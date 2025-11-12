@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Formula Student Telemetry</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            padding: 10px;
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #031fe6;
+            text-shadow: 0 0 10px #031fe6;
+        }
+        
+        .status {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: rgba(7, 33, 201, 0.1);
+            border-radius: 5px;
+            border-left: 5px solid #031fe6;
+        }
+        
+        .status-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        .status-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #ffff;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .status-label {
+            font-size: 12px;
+            color: #aaa;
+            margin-top: 5px;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .chart-container {
+            background: rgba(7, 33, 201, 0.05);
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        
+        .chart-container h3 {
+            margin-bottom: 10px;
+            color: #fff;
+            font-size: 14px;
+        }
+        
+        canvas {
+            max-height: 250px;
+        }
+        
+        .connection-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-size: 12px;
+            font-weight: bold;
+            z-index: 1000;
+        }
+        
+        .connection-status.connected {
+            background: #00ff88;
+            color: #000;
+        }
+        
+        .connection-status.disconnected {
+            background: #ff3333;
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div class="connection-status connected" id="connectionStatus">● Connected</div>
+    <div style="text-align: left; margin-bottom: 0px;">
+    <img src="/static/cropped-338345294_778307876971630_8269203501290917883_n-1.jpg" alt="Team Logo" style="height: 120px;">
+</div>
+
+    
+    <div class="status">
+        <div class="status-item">
+            <div class="status-value" id="speed">0</div>
+            <div class="status-label">km/h</div>
+        </div>
+        <div class="status-item">
+            <div class="status-value" id="throttle">0%</div>
+            <div class="status-label">Throttle</div>
+        </div>
+        <div class="status-item">
+            <div class="status-value" id="gear">N</div>
+            <div class="status-label">Gear</div>
+        </div>
+        <div class="status-item">
+            <div class="status-value" id="rssi">--</div>
+            <div class="status-label">RSSI (dBm)</div>
+        </div>
+    </div>
+    
+    <div class="grid">
+        <div class="chart-container">
+            <h3>🏁 Speed & Throttle</h3>
+            <canvas id="speedChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <h3>🔧 Engine Temps</h3>
+            <canvas id="tempChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <h3>🌡️ Fuel & Lambda</h3>
+            <canvas id="fuelChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <h3>💨 Acceleration</h3>
+            <canvas id="accelChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <h3>🛢️ Oil & Brake</h3>
+            <canvas id="pressureChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <h3>📡 Signal Quality</h3>
+            <canvas id="signalChart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let charts = {};
+        const maxDataPoints = 100;  // 30 seconds at 10Hz
+        
+        // Chart color scheme
+        const colors = {
+            red: 'rgb(255, 99, 132)',
+            blue: 'rgb(54, 162, 235)',
+            yellow: 'rgb(255, 206, 86)',
+            green: 'rgb(75, 192, 75)',
+            purple: 'rgb(153, 102, 255)',
+            orange: 'rgb(255, 159, 64)',
+            cyan: 'rgb(75, 192, 192)',
+            pink: 'rgb(255, 159, 192)'
+        };
+        
+        function createChart(canvasId, label, color, yLabel = '') {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            return new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: label,
+                        data: [],
+                        borderColor: color,
+                        backgroundColor: color + '15',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 5
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: { color: '#aaa', font: { size: 11 } }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                            ticks: { color: '#aaa', font: { size: 10 } },
+                            title: { display: true, text: yLabel, color: '#aaa' }
+                        },
+                        x: {
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                            ticks: { color: '#aaa', font: { size: 10 } }
+                        }
+                    }
+                }
+            });
+        }
+        
+        function createMultiChart(canvasId, datasets) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            return new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: datasets.map(ds => ({
+                        label: ds.label,
+                        data: [],
+                        borderColor: ds.color,
+                        backgroundColor: ds.color + '15',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: false,
+                        pointRadius: 0,
+                        yAxisID: ds.yAxisID || 'y'
+                    }))
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: { color: '#aaa', font: { size: 11 } }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                            ticks: { color: '#aaa', font: { size: 10 } }
+                        },
+                        x: {
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                            ticks: { color: '#aaa', font: { size: 10 } }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Initialize charts
+        charts.speed = createMultiChart('speedChart', [
+            { label: 'Speed (km/h)', color: colors.blue },
+            { label: 'Throttle (%)', color: colors.orange }
+        ]);
+        
+        charts.temp = createMultiChart('tempChart', [
+            { label: 'AGT (°C)', color: colors.red },
+            { label: 'EGT (°C)', color: colors.orange },
+            { label: 'Water (°C)', color: colors.blue },
+            { label: 'Oil (°C)', color: colors.purple }
+        ]);
+        
+        charts.fuel = createMultiChart('fuelChart', [
+            { label: 'Fuel Level (%)', color: colors.green },
+            { label: 'Lambda', color: colors.yellow }
+        ]);
+        
+        charts.accel = createChart('accelChart', 'Acceleration (g)', colors.pink, 'G-Force');
+        
+        charts.pressure = createMultiChart('pressureChart', [
+            { label: 'Oil Pressure (bar)', color: colors.purple },
+            { label: 'Brake Pressure (bar)', color: colors.red }
+        ]);
+        
+        charts.signal = createMultiChart('signalChart', [
+            { label: 'RSSI (dBm)', color: colors.green },
+            { label: 'SNR (dB)', color: colors.cyan }
+        ]);
+        
+        function addDataToChart(chart, timestamp, values) {
+            // Add timestamp label
+            if (chart.data.labels.length === 0 || chart.data.labels[chart.data.labels.length - 1] !== timestamp) {
+                chart.data.labels.push(timestamp);
+                
+                // Add data to each dataset
+                if (Array.isArray(values)) {
+                    values.forEach((val, idx) => {
+                        if (chart.data.datasets[idx]) {
+                            chart.data.datasets[idx].data.push(val);
+                        }
+                    });
+                } else {
+                    chart.data.datasets[0].data.push(values);
+                }
+                
+                // Trim old data
+                if (chart.data.labels.length > maxDataPoints) {
+                    chart.data.labels.shift();
+                    chart.data.datasets.forEach(ds => ds.data.shift());
+                }
+                
+                chart.update('none');  // 'none' = no animation for performance
+            }
+        }
+        
+        socket.on('connect', () => {
+            document.getElementById('connectionStatus').textContent = '● Connected';
+            document.getElementById('connectionStatus').className = 'connection-status connected';
+        });
+        
+        socket.on('disconnect', () => {
+            document.getElementById('connectionStatus').textContent = '⊘ Disconnected';
+            document.getElementById('connectionStatus').className = 'connection-status disconnected';
+        });
+        
+        socket.on('telemetry', (data) => {
+            const ts = (data.timestamp / 1000).toFixed(1);  // Convert to seconds for display
+            
+            // Update status display
+            document.getElementById('speed').textContent = Math.round(data.sebesseg);
+            document.getElementById('throttle').textContent = Math.round(data.aps) + '%';
+            document.getElementById('gear').textContent = data.fokozat === 0 ? 'N' : data.fokozat;
+            document.getElementById('rssi').textContent = Math.round(data.rssi);
+            
+            // Update charts
+            addDataToChart(charts.speed, ts, [data.sebesseg, data.aps]);
+            addDataToChart(charts.temp, ts, [data.agt, data.egt, data.vizho, data.olajh]);
+            addDataToChart(charts.fuel, ts, [data.uzemanyagny, data.lambda * 100]);
+            addDataToChart(charts.accel, ts, data.gyorsulas);
+            addDataToChart(charts.pressure, ts, [data.olajnyomas, data.feknyomas]);
+            addDataToChart(charts.signal, ts, [data.rssi, data.snr]);
+        });
+    </script>
+</body>
+</html>
