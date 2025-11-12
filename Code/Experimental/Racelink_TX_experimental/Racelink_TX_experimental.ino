@@ -36,8 +36,36 @@ struct RadioConfig {
     int8_t txPower;
 };
 #pragma pack()
+
+struct telemetryPack{
+  uint8_t sebesseg;
+};
 RadioConfig cfg;
 volatile bool configReceived = false;
+
+/*
+     ___ _____ ___  ___   ___ ___  ___ _____ ___  ___ 
+    | _ \_   _/ _ \/ __| | _ \ _ \/ _ \_   _/ _ \/ __|
+    |   / | || (_) \__ \ |  _/   / (_) || || (_) \__ \
+    |_|_\ |_| \___/|___/ |_| |_|_\\___/ |_| \___/|___/
+*/
+void configReceiveTask(void *pvParameters);
+void telemetryTransmitTask(void *pvParameters);
+void uartReceiveTask(void *pvParameters);
+void LEDTask(void *pvParameters);
+
+/*
+     ___ _   _ _  _  ___ _____ ___ ___  _  _   ___ ___  ___ _____ ___  ___ 
+    | __| | | | \| |/ __|_   _|_ _/ _ \| \| | | _ \ _ \/ _ \_   _/ _ \/ __|
+    | _|| |_| | .` | (__  | |  | | (_) | .` | |  _/   / (_) || || (_) \__ \
+    |_|  \___/|_|\_|\___| |_| |___\___/|_|\_| |_| |_|_\\___/ |_| \___/|___/                                                            
+*/
+static void lr1121_send_rfsw(const uint8_t cfg[8]);
+void xr1_apply_rfsw();
+void lr1121_default_setup(uint32_t st);
+void lr1121_setup(uint32_t st);
+void lr1121_receive_setup(void);
+void setTxFlag(void);
 
 /*
      ___ ___ _____ _   _ ___ 
@@ -61,18 +89,19 @@ void setup() {
     Serial.println(st);
     while (1);
   }
-
+  FastLED.addLeds<WS2812, DATA_PIN, RGB>(leds, NUM_LEDS);
   radio.setRegulatorDCDC();                   //DC reg mode for higher tx power
   st = radio.setModem(RADIOLIB_MODEM_LORA);   //LoRa modulation
   xr1_apply_rfsw();                           //rfswitch config  
   lr1121_default_setup(st);                   //radio Setup function call
-  lr1121_receive_setup();                     //receiving radio params blocking
-  lr1121_setup(st);                           //setting up radio with received params
+
   radio.setPacketSentAction(setTxFlag);       //tx flag irq interrupt flag
 
-  Serial.println(F("[TX] Starting first transmission..."));
-  String str = "Hello World! #" + String(txCount++);
-  transmissionState = radio.startTransmit(str);  // Start first TX here!
+  xTaskCreate(configReceiveTask, "configReceive", 4096, NULL, 1, NULL);
+  xTaskCreate(telemetryTransmitTask, "TelemetryTx", 3072, NULL, 1, NULL);
+  xTaskCreate(uartReceiveTask, "UartRx", 3072, NULL, 1, NULL);
+  xTaskCreate(LEDTask, "LEDTask", 2048, NULL, 2, NULL);
+  Serial.println("[TX] Tasks created, scheduler running");
 
   Serial.print(F("entering loop"));
 }
@@ -82,22 +111,103 @@ void setup() {
       | |_| (_) | (_) |  _/
       |____\___/ \___/|_|  
 */
-void loop() {
-  if(transmittedFlag){
-  transmittedFlag = false;
+void loop()
+{
+  vTaskDelay(pdMS_TO_TICKS(1000));
+}
 
-  if (transmissionState == RADIOLIB_ERR_NONE) {
-    // packet was successfully sent
-    Serial.println(F("transmission finished!"));
-  } else {
-    Serial.print(F("failed, code "));
-    Serial.println(transmissionState);
+/*
+     ___ _____ ___  ___   _____ _   ___ _  _____ 
+    | _ \_   _/ _ \/ __| |_   _/_\ / __| |/ / __|
+    |   / | || (_) \__ \   | |/ _ \\__ \ ' <\__ \
+    |_|_\ |_| \___/|___/   |_/_/ \_\___/_|\_\___/
+                                                  
+*/
+void configReceiveTask(void *pvParameters)
+{
+  lr1121_default_setup(0);
+    int st = radio.startReceive();  // ADD THIS - put radio into RX mode!
+  Serial.printf("[TX] RX mode started: %d\n", st);
+  while(1) {
+    uint8_t buffer[sizeof(RadioConfig)];
+    int state = radio.receive(buffer, sizeof(RadioConfig), 1000);
+    if(state == RADIOLIB_ERR_NONE) {
+      // Reconstruct struct from buffer using memcpy
+      memcpy(&cfg, buffer, sizeof(RadioConfig));
+      configReceived = true;
+      
+      Serial.printf("[TX] Config received: %.1f MHz, BW%.1f, SF%u, +%d dBm\n",
+                    cfg.frequency, cfg.bandwidth, cfg.spreadingFactor, cfg.txPower);
+        lr1121_setup(0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelete(NULL);     
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
-  radio.finishTransmit();
-  vTaskDelay(pdMS_TO_TICKS(1));
-  String str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+}
+
+void telemetryTransmitTask(void *pvParameters)
+{
+  while(!configReceived) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  
+  vTaskDelay(pdMS_TO_TICKS(500));
+
+  String str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
   transmissionState = radio.startTransmit(str);
+  Serial.println("[TX] First transmission started");
+
+  while(1){
+    if(transmittedFlag) {
+      transmittedFlag = false;
+      Serial.println("[TX] Flag received");
+
+      if (transmissionState == RADIOLIB_ERR_NONE) {
+        Serial.println(F("transmission finished!"));
+      } else {
+        Serial.print(F("failed, code "));
+        Serial.println(transmissionState);
+      }
+      
+      radio.finishTransmit();
+      vTaskDelay(pdMS_TO_TICKS(1));
+      
+      String str = "A";
+      int st = radio.startTransmit(str);
+      Serial.printf("[TX] Next transmission started: %d\n", st);
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
+}
+
+void uartReceiveTask(void *pvParameters)
+{
+  while(1) {
+    // Read GPS/sensor data from Serial2
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
+void LEDTask(void *pvParameters)
+{
+  while(1){
+    if (configReceived){
+      leds[0] = CRGB::Blue;
+      FastLED.show();
+    }else if(!configReceived){
+      leds[0] = CRGB::Blue;
+      FastLED.show();
+      vTaskDelay(pdMS_TO_TICKS(500));
+      
+      // Now turn the LED off, then pause
+      leds[0] = CRGB::Black;
+      FastLED.show();
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  vTaskDelay(pdMS_TO_TICKS(10));
 }
 
 /*
@@ -151,36 +261,7 @@ void lr1121_setup(uint32_t st)
   radio.invertIQ(false);
 }
 
-//----------------------RECEIVE CONFIG SETUP----------------------------
-void lr1121_receive_setup(void) {
-  
-  while(1) {
-    uint8_t buffer[sizeof(RadioConfig)];
-    int state = radio.receive(buffer, sizeof(RadioConfig), 1000);
-    Serial.println("TXradio receive set");
-    if(state == RADIOLIB_ERR_NONE) {
-      // Reconstruct struct from buffer using memcpy
-      memcpy(&cfg, buffer, sizeof(RadioConfig));
-      configReceived = true;
-      
-      Serial.printf("[TX] Config received: %.1f MHz, BW%.1f, SF%u, +%d dBm\n",
-                    cfg.frequency, cfg.bandwidth, cfg.spreadingFactor, cfg.txPower);
-      return;
-    }
-  }
-}
-
 //----------------------SET TRANSMIT FLAG----------------------------
 void setTxFlag(void) {
   transmittedFlag = true;
 }
-/*
-     ___ _____ ___  ___   _____ _   ___ _  _____ 
-    | _ \_   _/ _ \/ __| |_   _/_\ / __| |/ / __|
-    |   / | || (_) \__ \   | |/ _ \\__ \ ' <\__ \
-    |_|_\ |_| \___/|___/   |_/_/ \_\___/_|\_\___/
-                                                  
-*/
-
-
-

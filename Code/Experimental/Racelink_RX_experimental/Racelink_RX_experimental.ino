@@ -29,6 +29,8 @@ SemaphoreHandle_t radioMutex = NULL;\
 
 volatile uint32_t pktCount = 0;
 
+float latestRSSI = 0;
+
 //--------------RADIO CONFIG STRUCT-------------
 #pragma pack(1)
 struct RadioConfig {
@@ -48,6 +50,7 @@ RadioConfig cfg;
 void configBroadcastTask(void *pvParameters);
 void telemetryReceiveTask(void *pvParameters);
 void calcPktRateTask(void *pvParameters);
+void LEDTask(void *pvParameters);
 
 /*
      ___ _   _ _  _  ___ _____ ___ ___  _  _   ___ ___  ___ _____ ___  ___ 
@@ -102,6 +105,7 @@ void setup() {
   xTaskCreate(configBroadcastTask, "ConfigBroadcast", 2048, NULL, 2, NULL);
   xTaskCreate(telemetryReceiveTask, "TelemetryRx", 3072, NULL, 1, NULL);
   xTaskCreate(calcPktRateTask, "PacketRateCnt", 2048, NULL, 2, NULL);
+  xTaskCreate(LEDTask, "LEDTask", 2048, NULL, 2, NULL);
   Serial.println("[RX] Tasks created, scheduler running");
 
   Serial.print(F("[LR1121] Starting to listen ... "));
@@ -124,6 +128,94 @@ void setup() {
 void loop() {
   delay(1000);
 }
+
+/*
+     ___ _____ ___  ___   _____ _   ___ _  _____ 
+    | _ \_   _/ _ \/ __| |_   _/_\ / __| |/ / __|
+    |   / | || (_) \__ \   | |/ _ \\__ \ ' <\__ \
+    |_|_\ |_| \___/|___/   |_/_/ \_\___/_|\_\___/                                       
+*/
+void configBroadcastTask(void *pvParameters) {
+  while(1) {
+     xSemaphoreTake(radioMutex, portMAX_DELAY);
+     lr1121_default_setup(0);
+    lr1121_send_setup();
+    lr1121_setup(0);
+    radio.startReceive();
+    xSemaphoreGive(radioMutex);
+    vTaskDelay(pdMS_TO_TICKS(10000));  // 10 seconds
+  }
+}
+
+void telemetryReceiveTask(void *pvParameters) {
+  while(1) {
+    // check if the flag is set
+    if(receivedFlag) {
+      // reset flag
+      xSemaphoreTake(radioMutex, portMAX_DELAY);
+      receivedFlag = false;
+      String str;
+      int state = radio.readData(str);
+      xSemaphoreGive(radioMutex);
+      if (state == RADIOLIB_ERR_NONE) {
+        // packet was successfully received
+        Serial.println(F("[LR1121] Received packet!"));
+        pktCount++;
+
+        // print data of the packet
+        Serial.print(F("[LR1121] Data:\t\t"));
+        Serial.println(str);
+
+        // print RSSI (Received Signal Strength Indicator)
+        Serial.print(F("[LR1121] RSSI:\t\t"));
+        latestRSSI = radio.getRSSI();
+        Serial.print(latestRSSI);
+        Serial.println(F(" dBm"));
+
+        // print SNR (Signal-to-Noise Ratio)
+        Serial.print(F("[LR1121] SNR:\t\t"));
+        Serial.print(radio.getSNR());
+        Serial.println(F(" dB"));
+
+      } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+        // packet was received, but is malformed
+        Serial.println(F("CRC error!"));
+
+      } else {
+        // some other error occurred
+        Serial.print(F("failed, code "));
+        Serial.println(state);
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+void LEDTask(void *pvParameters)
+{
+  while(1) {
+    if(latestRSSI != 0) {
+      leds[0] = rssiToColor(latestRSSI);
+      FastLED.show();
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
+void calcPktRateTask(void *pvParameters) {
+    TickType_t lastWake = xTaskGetTickCount();
+    uint32_t countSnapshot;
+    while (1) {
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
+        countSnapshot = pktCount;
+        pktCount = 0;
+        Serial.print("packets per second:\t");
+        Serial.println(countSnapshot);
+    }
+}
+
+
+
 /*
      ___ _   _ _  _  ___ _____ ___ ___  _  _ ___ 
     | __| | | | \| |/ __|_   _|_ _/ _ \| \| / __|
@@ -177,7 +269,7 @@ void lr1121_setup(uint32_t st)
 void lr1121_get_setup(void)
 {
   Serial.println("Waiting for radio parameters");
-  uint16_t buf[4] = {8680,250,7,22};
+  uint16_t buf[4] = {24500,812,6,13};
 /*
   //GET RADIO PARAMS FROM SERIAL, COMMENTED OUT FOR TESTING 
   for (uint8_t i = 0; i < 4; i++) {
@@ -223,9 +315,9 @@ void lr1121_send_setup(void) {
     
     Serial.printf("[RX] Sending config (size: %d bytes)\n", sizeof(RadioConfig));
     
-    for(int i = 0; i < 5; i++) {
+    for(int i = 0; i < 3; i++) {
         radio.transmit(buffer, sizeof(RadioConfig));
-        delay(200);
+        delay(50);
     }
     
     Serial.println("[RX] Config transmitted");
@@ -235,75 +327,20 @@ void lr1121_send_setup(void) {
 void setFlag(void) {
   receivedFlag = true;
 }
-/*
-     ___ _____ ___  ___   _____ _   ___ _  _____ 
-    | _ \_   _/ _ \/ __| |_   _/_\ / __| |/ / __|
-    |   / | || (_) \__ \   | |/ _ \\__ \ ' <\__ \
-    |_|_\ |_| \___/|___/   |_/_/ \_\___/_|\_\___/                                       
-*/
-void configBroadcastTask(void *pvParameters) {
-  while(1) {
-     xSemaphoreTake(radioMutex, portMAX_DELAY);
-     lr1121_default_setup(0);
-    lr1121_send_setup();
-    lr1121_setup(0);
-    radio.startReceive();
-    xSemaphoreGive(radioMutex);
-    vTaskDelay(pdMS_TO_TICKS(5000));  // 5 seconds
+
+CRGB rssiToColor(float rssi) {
+  if (rssi > -30) rssi = -30;
+  if (rssi < -120) rssi = -120;
+  
+  float normalized = (rssi + 120) / 90.0;
+  
+  if (normalized < 0.5) {
+    float t = normalized * 2;
+    // GRB order: (Green, Red, Blue)
+    return CRGB((uint8_t)(255 * t), 255, 0);  // Red → Yellow
+  } else {
+    float t = (normalized - 0.5) * 2;
+    return CRGB(255, (uint8_t)(255 * (1 - t)), 0);  // Yellow → Green
   }
-}
-
-void telemetryReceiveTask(void *pvParameters) {
-  while(1) {
-    // check if the flag is set
-    if(receivedFlag) {
-      // reset flag
-      xSemaphoreTake(radioMutex, portMAX_DELAY);
-      receivedFlag = false;
-      String str;
-      int state = radio.readData(str);
-      xSemaphoreGive(radioMutex);
-      if (state == RADIOLIB_ERR_NONE) {
-        // packet was successfully received
-        Serial.println(F("[LR1121] Received packet!"));
-        pktCount++;
-
-        // print data of the packet
-        Serial.print(F("[LR1121] Data:\t\t"));
-        Serial.println(str);
-
-        // print RSSI (Received Signal Strength Indicator)
-        Serial.print(F("[LR1121] RSSI:\t\t"));
-        Serial.print(radio.getRSSI());
-        Serial.println(F(" dBm"));
-
-        // print SNR (Signal-to-Noise Ratio)
-        Serial.print(F("[LR1121] SNR:\t\t"));
-        Serial.print(radio.getSNR());
-        Serial.println(F(" dB"));
-
-      } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
-        // packet was received, but is malformed
-        Serial.println(F("CRC error!"));
-
-      } else {
-        // some other error occurred
-        Serial.print(F("failed, code "));
-        Serial.println(state);
-      }
-    }
-    vTaskDelay(pdMS_TO_TICKS(1));
-  }
-}
-void calcPktRateTask(void *pvParameters) {
-    TickType_t lastWake = xTaskGetTickCount();
-    uint32_t countSnapshot;
-    while (1) {
-        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
-        countSnapshot = pktCount;
-        pktCount = 0;
-        Serial.print("packets per second:\t");
-        Serial.println(countSnapshot);
-    }
 }
 

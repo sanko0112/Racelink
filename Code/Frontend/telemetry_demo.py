@@ -60,7 +60,9 @@ def index():
 @app.route('/golden')
 def golden():
     return render_template('dashboard_golden.html')
-
+@app.route('/gridstack')
+def gridstack():
+    return render_template('dashboard_gridstack.html')
 @socketio.on('connect')
 def handle_connect():
     print('Client connected')
