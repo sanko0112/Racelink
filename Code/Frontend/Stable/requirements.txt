@@ -1,0 +1,15 @@
+# RaceLink Telemetry Server Requirements
+
+# Core web framework
+Flask==3.0.0
+flask-socketio==5.3.5
+
+# Serial communication - IMPORTANT: Install pyserial, NOT serial
+pyserial==3.5
+
+# SocketIO server engine
+python-socketio==5.10.0
+python-engineio==4.8.0
+
+# Web server
+eventlet==0.33.3

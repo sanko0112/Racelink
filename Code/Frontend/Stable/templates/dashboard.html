@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RaceLink Telemetry Dashboard</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/gridstack.js/8.4.0/gridstack.min.css" rel="stylesheet" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gridstack.js/8.4.0/gridstack-all.min.js"></script>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script src="https://maps.googleapis.com/maps/api/js?key={{ google_maps_key }}"></script>
+    <script src="https://unpkg.com/leaflet.gridlayer.googlemutant@latest/dist/Leaflet.GoogleMutant.js"></script>
+    <script src="https://kit.fontawesome.com/82c79ef3ef.js" crossorigin="anonymous"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            overflow: hidden;
+        }
+        
+        .header {
+            background: #0a0a0a;
+            padding: 15px 20px;
+            border-bottom: 2px solid #031fe6;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            height: 70px;
+        }
+        
+        .header-left {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        
+        .header-title {
+            color: #031fe6;
+            font-size: 20px;
+            font-weight: bold;
+            text-shadow: 0 0 10px #031fe6;
+        }
+        
+        .status-bar {
+            display: flex;
+            gap: 20px;
+        }
+        
+        .status-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+        }
+        
+        .status-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .status-label {
+            font-size: 10px;
+            color: #aaa;
+        }
+        
+        .connection-status {
+            padding: 8px 12px;
+            border-radius: 5px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        
+        .connection-status.connected {
+            background: #00ff88;
+            color: #000;
+        }
+        
+        .connection-status.disconnected {
+            background: #ff3333;
+            color: #fff;
+        }
+        
+        .controls {
+            padding: 10px 20px;
+            background: #0a0a0a;
+            border-bottom: 1px solid #333;
+            display: flex;
+            gap: 10px;
+            position: fixed;
+            top: 70px;
+            left: 0;
+            right: 0;
+            z-index: 999;
+            height: 45px;
+        }
+        
+        .controls button {
+            padding: 6px 12px;
+            background: #0621ca;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: background 0.2s;
+        }
+        
+        .controls button:hover {
+            background: #0428ff;
+        }
+        
+        .controls button.active {
+            background: #00ff88;
+            color: #000;
+        }
+        
+        #gridContainer {
+            position: fixed;
+            top: 115px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            padding: 10px;
+            overflow-y: auto;
+        }
+        
+        .grid-stack {
+            background: #1a1a1a;
+            min-height: calc(100vh - 115px);
+        }
+        
+        .grid-stack-item {
+            background: rgba(3, 31, 230, 0.05);
+            border: 1px solid #333;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+        
+        .grid-stack-item-content {
+            background: rgba(3, 31, 230, 0.05);
+            padding: 10px;
+            height: 100%;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+        
+        .widget-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        
+        .chart-title {
+            color: #031fe6;
+            font-size: 12px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        
+        .close-btn {
+            background: #000000;
+            color: #fff;
+            border: none;
+            border-radius: 3px;
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .close-btn:hover {
+            background: #ff0000;
+        }
+        
+        .chart-wrapper {
+            flex: 1;
+            position: relative;
+            min-height: 0;
+        }
+        
+        canvas {
+            width: 100% !important;
+            height: 100% !important;
+        }
+        
+        .gs-resize-handle {
+            background: linear-gradient(135deg, transparent 50%, #031fe6 50%);
+            opacity: 0.5;
+        }
+        
+        .gs-resize-handle:hover {
+            opacity: 1;
+        }
+        
+        /* Widget Menu */
+        .widget-menu {
+            position: fixed;
+            top: 115px;
+            right: 10px;
+            width: 350px;
+            max-height: calc(100vh - 125px);
+            background: #0a0a0a;
+            border: 2px solid #031fe6;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(3, 31, 230, 0.3);
+            z-index: 2000;
+            overflow-y: auto;
+        }
+        
+        .widget-menu-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            border-bottom: 1px solid #333;
+            background: #031fe6;
+        }
+        
+        .widget-menu-header h3 {
+            margin: 0;
+            color: #fff;
+            font-size: 16px;
+        }
+        
+        .close-menu-btn {
+            background: #fff;
+            color: #000;
+            border: none;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            font-size: 18px;
+            line-height: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .widget-categories {
+            padding: 10px;
+        }
+        
+        .widget-category {
+            margin-bottom: 15px;
+        }
+        
+        .widget-category h4 {
+            color: #031fe6;
+            font-size: 12px;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            border-bottom: 1px solid #333;
+            padding-bottom: 5px;
+        }
+        
+        .widget-list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 10px;
+            background: rgba(255, 255, 255, 0.05);
+            margin-bottom: 5px;
+            border-radius: 4px;
+            border-left: 3px solid transparent;
+        }
+        
+        .widget-list-item.active {
+            border-left-color: #00ff88;
+            background: rgba(0, 255, 136, 0.1);
+        }
+        
+        .widget-list-item.inactive {
+            border-left-color: #ff3333;
+        }
+        
+        .widget-item-name {
+            font-size: 11px;
+            color: #fff;
+        }
+        
+        .widget-item-btn {
+            padding: 4px 10px;
+            background: #031fe6;
+            color: #fff;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 10px;
+        }
+        
+        .widget-item-btn:hover {
+            background: #0428ff;
+        }
+        
+        .widget-item-btn.remove {
+            background: #000000;
+        }
+        
+        .widget-item-btn.remove:hover {
+            background: #ff0000;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-left">
+            <div class="header-title">🏎️ RaceLink Telemetry</div>
+        </div>
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-value" id="speed">0</div>
+                <div class="status-label">km/h</div>
+            </div>
+            <div class="status-item">
+                <div class="status-value" id="throttle">0%</div>
+                <div class="status-label">Throttle</div>
+            </div>
+            <div class="status-item">
+                <div class="status-value" id="gear">N</div>
+                <div class="status-label">Gear</div>
+            </div>
+            <div class="status-item">
+                <div class="status-value" id="rssi">-</div>
+                <div class="status-label">RSSI</div>
+            </div>
+            <div id="connectionStatus" class="connection-status disconnected">⊘ Disconnected</div>
+        </div>
+    </div>
+    
+    <div class="controls">
+        <button onclick="toggleWidgetMenu()" id="widgetMenuBtn">➕ Add Widgets</button>
+        <button onclick="resetLayout()">↺ Reset Layout</button>
+    </div>
+    
+    <div id="widgetMenu" class="widget-menu" style="display: none;">
+        <div class="widget-menu-header">
+            <h3>Available Widgets</h3>
+            <button onclick="toggleWidgetMenu()" class="close-menu-btn">×</button>
+        </div>
+        <div class="widget-categories">
+            <div class="widget-category">
+                <h4>Performance</h4>
+                <div id="category-performance"></div>
+            </div>
+            <div class="widget-category">
+                <h4>Temperatures</h4>
+                <div id="category-temps"></div>
+            </div>
+            <div class="widget-category">
+                <h4>Pressures</h4>
+                <div id="category-pressures"></div>
+            </div>
+            <div class="widget-category">
+                <h4>Fuel & Lambda</h4>
+                <div id="category-fuel"></div>
+            </div>
+            <div class="widget-category">
+                <h4>Electrical</h4>
+                <div id="category-electrical"></div>
+            </div>
+            <div class="widget-category">
+                <h4>Signal Quality</h4>
+                <div id="category-signal"></div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="gridContainer">
+        <div class="grid-stack"></div>
+    </div>
+
+    <script>
+        const socket = io();
+        let charts = {};
+        let grid;
+        const maxDataPoints = 100;
+        let isEditMode = false;
+
+        let map = null;           // Will store the Leaflet map
+        let carMarker = null;     // Will store the car position marker
+        
+        // Chart color scheme
+        const colors = {
+            red: 'rgb(255, 99, 132)',
+            blue: 'rgb(54, 162, 235)',
+            yellow: 'rgb(255, 206, 86)',
+            green: 'rgb(75, 192, 75)',
+            purple: 'rgb(153, 102, 255)',
+            orange: 'rgb(255, 159, 64)',
+            cyan: 'rgb(75, 192, 192)',
+            pink: 'rgb(255, 159, 192)'
+        };
+        
+        // Widget definitions - each data point gets its own widget
+        const widgets = [
+            // Speed & Performance
+            { id: 'speed', title: '🏎️ Speed', x: 0, y: 0, w: 3, h: 3, category: 'performance' },
+            { id: 'throttle', title: '⚡ Throttle Position', x: 3, y: 0, w: 3, h: 3, category: 'performance' },
+            { id: 'gear', title: '⚙️ Gear', x: 6, y: 0, w: 2, h: 3, category: 'performance' },
+            { id: 'accel', title: '💨 Acceleration', x: 8, y: 0, w: 4, h: 3, category: 'performance' },
+            
+            // Engine Temps
+            { id: 'agt', title: '🌡️ Air Intake Temp', x: 0, y: 3, w: 3, h: 3, category: 'temps' },
+            { id: 'egt', title: '🔥 Exhaust Temp', x: 3, y: 3, w: 3, h: 3, category: 'temps' },
+            { id: 'water', title: '💧 Water Temp', x: 6, y: 3, w: 3, h: 3, category: 'temps' },
+            { id: 'oil_temp', title: '🛢️ Oil Temp', x: 9, y: 3, w: 3, h: 3, category: 'temps' },
+            
+            // Pressures
+            { id: 'oil_pressure', title: '🛢️ Oil Pressure', x: 0, y: 6, w: 3, h: 3, category: 'pressures' },
+            { id: 'brake', title: '🔴 Brake Pressure', x: 3, y: 6, w: 3, h: 3, category: 'pressures' },
+            
+            // Fuel & Lambda
+            { id: 'fuel', title: '⛽ Fuel Level', x: 6, y: 6, w: 3, h: 3, category: 'fuel' },
+            { id: 'lambda', title: '🔬 Lambda', x: 9, y: 6, w: 3, h: 3, category: 'fuel' },
+            
+            // Electrical
+            { id: 'voltage', title: '🔋 Battery Voltage', x: 0, y: 9, w: 3, h: 3, category: 'electrical' },
+            
+            // Signal Quality
+            { id: 'rssi', title: '📡 RSSI', x: 3, y: 9, w: 3, h: 3, category: 'signal' },
+            { id: 'snr', title: '📶 SNR', x: 6, y: 9, w: 3, h: 3, category: 'signal' },
+
+            // MAP
+            { id: 'map', title: '<i class="fa-regular fa-map"></i> Track Map', x: 0 , y: 12, w: 6, h: 4, category:'performance'}
+
+        ];
+        
+    function createWidget(widget) {
+        // Check if this is the map widget - it needs different HTML
+        if (widget.id === 'map') {
+            return `
+                <div class="grid-stack-item" gs-id="${widget.id}" gs-x="${widget.x}" gs-y="${widget.y}" gs-w="${widget.w}" gs-h="${widget.h}">
+                    <div class="grid-stack-item-content">
+                        <div class="widget-header">
+                            <div class="chart-title">${widget.title}</div>
+                            <button class="close-btn" onclick="removeWidget('${widget.id}')">×</button>
+                        </div>
+                        <div class="chart-wrapper">
+                            <div id="trackMap" style="width: 100%; height: 100%;"></div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else {
+            // All other widgets use canvas for charts
+            return `
+                <div class="grid-stack-item" gs-id="${widget.id}" gs-x="${widget.x}" gs-y="${widget.y}" gs-w="${widget.w}" gs-h="${widget.h}">
+                    <div class="grid-stack-item-content">
+                        <div class="widget-header">
+                            <div class="chart-title">${widget.title}</div>
+                            <button class="close-btn" onclick="removeWidget('${widget.id}')">×</button>
+                        </div>
+                        <div class="chart-wrapper">
+                            <canvas id="${widget.id}Chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+    }
+        
+        function initGrid() {
+            grid = GridStack.init({
+                cellHeight: 80,
+                margin: 10,
+                float: false,
+                disableOneColumnMode: true,
+                animate: true,
+                handle: '.widget-header'
+                // Grid is enabled by default - drag and resize work immediately
+            });
+            
+            // Load saved layout or use default
+            const savedLayout = localStorage.getItem('dashboardLayout');
+            if (savedLayout) {
+                const layout = JSON.parse(savedLayout);
+                layout.forEach(item => {
+                    const widget = widgets.find(w => w.id === item.id);
+                    if (widget) {
+                        grid.addWidget(createWidget({ ...widget, ...item }));
+                    }
+                });
+            } else {
+                widgets.forEach(widget => {
+                    grid.addWidget(createWidget(widget));
+                });
+            }
+            
+            // Auto-save layout on change
+            grid.on('change', function() {
+                const layout = grid.save(false).map(item => ({
+                    id: item.id,
+                    x: item.x,
+                    y: item.y,
+                    w: item.w,
+                    h: item.h
+                }));
+                localStorage.setItem('dashboardLayout', JSON.stringify(layout));
+            });
+            
+            // Initialize charts after widgets are added
+            setTimeout(initCharts, 100);
+        }
+        
+        function resetLayout() {
+            grid.removeAll();
+            widgets.forEach(widget => {
+                grid.addWidget(createWidget(widget));
+            });
+            setTimeout(initCharts, 100);
+            localStorage.removeItem('dashboardLayout');
+        }
+        
+        function toggleWidgetMenu() {
+            const menu = document.getElementById('widgetMenu');
+            if (menu.style.display === 'none') {
+                menu.style.display = 'block';
+                updateWidgetMenu();
+            } else {
+                menu.style.display = 'none';
+            }
+        }
+        
+        function updateWidgetMenu() {
+            // Get current active widgets
+            const activeWidgets = new Set();
+            document.querySelectorAll('.grid-stack-item').forEach(el => {
+                const id = el.getAttribute('gs-id');
+                if (id) activeWidgets.add(id);
+            });
+            
+            // Group widgets by category
+            const categories = {};
+            widgets.forEach(widget => {
+                if (!categories[widget.category]) {
+                    categories[widget.category] = [];
+                }
+                categories[widget.category].push(widget);
+            });
+            
+            // Populate each category
+            Object.keys(categories).forEach(category => {
+                const container = document.getElementById(`category-${category}`);
+                if (!container) return;
+                
+                container.innerHTML = '';
+                categories[category].forEach(widget => {
+                    const isActive = activeWidgets.has(widget.id);
+                    const item = document.createElement('div');
+                    item.className = `widget-list-item ${isActive ? 'active' : 'inactive'}`;
+                    item.innerHTML = `
+                        <span class="widget-item-name">${widget.title}</span>
+                        ${isActive 
+                            ? `<button class="widget-item-btn remove" onclick="removeWidget('${widget.id}')">Remove</button>`
+                            : `<button class="widget-item-btn" onclick="addWidget('${widget.id}')">Add</button>`
+                        }
+                    `;
+                    container.appendChild(item);
+                });
+            });
+        }
+        
+        function addWidget(id) {
+            const widget = widgets.find(w => w.id === id);
+            if (!widget) return;
+            
+            // Check if widget already exists
+            const existing = document.querySelector(`[gs-id="${id}"]`);
+            if (existing) return;
+            
+            // Destroy existing chart if it exists
+            if (charts[id]) {
+                charts[id].destroy();
+                delete charts[id];
+            }
+            
+            // Add widget to grid
+            grid.addWidget(createWidget(widget));
+            
+            // Initialize ONLY this specific chart after a short delay
+            setTimeout(() => {
+                initSingleChart(id);
+                updateWidgetMenu();  // Refresh menu to show updated state
+            }, 150);
+        }
+        
+        function removeWidget(id) {
+            const el = document.querySelector(`[gs-id="${id}"]`);
+            if (el) {
+                // Destroy chart first
+                if (charts[id]) {
+                    charts[id].destroy();
+                    delete charts[id];
+                }
+                // Then remove widget
+                grid.removeWidget(el);
+                // Update menu
+                setTimeout(() => updateWidgetMenu(), 50);
+            }
+        }
+        
+        function initSingleChart(id) {
+            // Initialize specific chart based on ID
+            switch(id) {
+                case 'speed':
+                    charts.speed = createChart('speed', [
+                        { label: 'Speed (km/h)', color: colors.blue, fill: true }
+                    ]);
+                    break;
+                case 'throttle':
+                    charts.throttle = createChart('throttle', [
+                        { label: 'Throttle (%)', color: colors.orange, fill: true }
+                    ]);
+                    break;
+                case 'gear':
+                    charts.gear = createChart('gear', [
+                        { label: 'Gear', color: colors.green, fill: false }
+                    ]);
+                    break;
+                case 'accel':
+                    charts.accel = createChart('accel', [
+                        { label: 'Acceleration (g)', color: colors.pink, fill: true }
+                    ]);
+                    break;
+                case 'agt':
+                    charts.agt = createChart('agt', [
+                        { label: 'AGT (°C)', color: colors.red, fill: true }
+                    ]);
+                    break;
+                case 'egt':
+                    charts.egt = createChart('egt', [
+                        { label: 'EGT (°C)', color: colors.orange, fill: true }
+                    ]);
+                    break;
+                case 'water':
+                    charts.water = createChart('water', [
+                        { label: 'Water (°C)', color: colors.blue, fill: true }
+                    ]);
+                    break;
+                case 'oil_temp':
+                    charts.oil_temp = createChart('oil_temp', [
+                        { label: 'Oil (°C)', color: colors.purple, fill: true }
+                    ]);
+                    break;
+                case 'oil_pressure':
+                    charts.oil_pressure = createChart('oil_pressure', [
+                        { label: 'Oil Pressure (bar)', color: colors.purple, fill: true }
+                    ]);
+                    break;
+                case 'brake':
+                    charts.brake = createChart('brake', [
+                        { label: 'Brake (bar)', color: colors.red, fill: true }
+                    ]);
+                    break;
+                case 'fuel':
+                    charts.fuel = createChart('fuel', [
+                        { label: 'Fuel (%)', color: colors.green, fill: true }
+                    ]);
+                    break;
+                case 'lambda':
+                    charts.lambda = createChart('lambda', [
+                        { label: 'Lambda', color: colors.yellow, fill: false }
+                    ]);
+                    break;
+                case 'voltage':
+                    charts.voltage = createChart('voltage', [
+                        { label: 'Voltage (V)', color: colors.cyan, fill: true }
+                    ]);
+                    break;
+                case 'rssi':
+                    charts.rssi = createChart('rssi', [
+                        { label: 'RSSI (dBm)', color: colors.green, fill: false }
+                    ]);
+                    break;
+                case 'snr':
+                    charts.snr = createChart('snr', [
+                        { label: 'SNR (dB)', color: colors.cyan, fill: false }
+                    ]);
+                    break;
+                case 'map':
+                    initMap();
+                    break;    
+            }
+        }
+        
+        function createChart(canvasId, datasets) {
+            const canvas = document.getElementById(canvasId + 'Chart');
+            if (!canvas) {
+                console.warn(`Canvas not found: ${canvasId}Chart`);
+                return null;
+            }
+            
+            // Check if canvas already has a chart and destroy it
+            const existingChart = Chart.getChart(canvas);
+            if (existingChart) {
+                existingChart.destroy();
+            }
+            
+            const ctx = canvas.getContext('2d');
+            return new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: datasets.map(ds => ({
+                        label: ds.label,
+                        data: [],
+                        borderColor: ds.color,
+                        backgroundColor: ds.color + '15',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: ds.fill || false,
+                        pointRadius: 0
+                    }))
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: { color: '#aaa', font: { size: 10 } }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                            ticks: { color: '#aaa', font: { size: 9 } }
+                        },
+                        x: {
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                            ticks: { color: '#aaa', font: { size: 9 }, maxTicksLimit: 8 }
+                        }
+                    }
+                }
+            });
+        }
+        
+        function initCharts() {
+            // Performance charts
+            charts.speed = createChart('speed', [
+                { label: 'Speed (km/h)', color: colors.blue, fill: true }
+            ]);
+            
+            charts.throttle = createChart('throttle', [
+                { label: 'Throttle (%)', color: colors.orange, fill: true }
+            ]);
+            
+            charts.gear = createChart('gear', [
+                { label: 'Gear', color: colors.green, fill: false }
+            ]);
+            
+            charts.accel = createChart('accel', [
+                { label: 'Acceleration (g)', color: colors.pink, fill: true }
+            ]);
+            
+            // Temperature charts
+            charts.agt = createChart('agt', [
+                { label: 'AGT (°C)', color: colors.red, fill: true }
+            ]);
+            
+            charts.egt = createChart('egt', [
+                { label: 'EGT (°C)', color: colors.orange, fill: true }
+            ]);
+            
+            charts.water = createChart('water', [
+                { label: 'Water (°C)', color: colors.blue, fill: true }
+            ]);
+            
+            charts.oil_temp = createChart('oil_temp', [
+                { label: 'Oil (°C)', color: colors.purple, fill: true }
+            ]);
+            
+            // Pressure charts
+            charts.oil_pressure = createChart('oil_pressure', [
+                { label: 'Oil Pressure (bar)', color: colors.purple, fill: true }
+            ]);
+            
+            charts.brake = createChart('brake', [
+                { label: 'Brake (bar)', color: colors.red, fill: true }
+            ]);
+            
+            // Fuel & Lambda
+            charts.fuel = createChart('fuel', [
+                { label: 'Fuel (%)', color: colors.green, fill: true }
+            ]);
+            
+            charts.lambda = createChart('lambda', [
+                { label: 'Lambda', color: colors.yellow, fill: false }
+            ]);
+            
+            // Electrical
+            charts.voltage = createChart('voltage', [
+                { label: 'Voltage (V)', color: colors.cyan, fill: true }
+            ]);
+            
+            // Signal
+            charts.rssi = createChart('rssi', [
+                { label: 'RSSI (dBm)', color: colors.green, fill: false }
+            ]);
+            
+            charts.snr = createChart('snr', [
+                { label: 'SNR (dB)', color: colors.cyan, fill: false }
+            ]);
+        }
+
+        function initMap() {
+            const mapContainer = document.getElementById('trackMap');
+            
+            if (!mapContainer) {
+                console.warn('Map container not found');
+                return null;
+            }
+            
+            if (map) {
+                map.remove();
+                map = null;
+            }
+            
+            // Create map with normal dragging
+            map = L.map('trackMap', {
+                dragging: true,           // Normal left-click drag
+                scrollWheelZoom: true,
+                doubleClickZoom: true
+            }).setView([46.425685, 25.390393], 16);
+            
+            L.gridLayer.googleMutant({
+                type: 'satellite',
+                maxZoom: 21
+            }).addTo(map);
+            
+            // Create marker with your pixel car
+            carMarker = L.marker([46.425685, 25.390393], {
+                icon: L.icon({
+                    iconUrl: '/static/car.png',
+                    iconSize: [30, 20],      // Size of your pixel car
+                    iconAnchor: [15, 10]     // Center point
+                })
+            }).addTo(map);
+            
+            console.log('Map initialized with pixel car marker');
+            return map;
+        }
+        
+        function addDataToChart(chart, timestamp, values) {
+            if (!chart) return;
+            
+            chart.data.labels.push(timestamp);
+            
+            if (Array.isArray(values)) {
+                values.forEach((val, idx) => {
+                    if (chart.data.datasets[idx]) {
+                        chart.data.datasets[idx].data.push(val);
+                    }
+                });
+            } else {
+                chart.data.datasets[0].data.push(values);
+            }
+            
+            // Trim old data
+            if (chart.data.labels.length > maxDataPoints) {
+                chart.data.labels.shift();
+                chart.data.datasets.forEach(ds => ds.data.shift());
+            }
+            
+            chart.update('none');
+        }
+        
+        //Map handler    
+
+        // Socket.io handlers
+        socket.on('connect', () => {
+            document.getElementById('connectionStatus').textContent = '● Connected';
+            document.getElementById('connectionStatus').className = 'connection-status connected';
+        });
+        
+        socket.on('disconnect', () => {
+            document.getElementById('connectionStatus').textContent = '⊘ Disconnected';
+            document.getElementById('connectionStatus').className = 'connection-status disconnected';
+        });
+
+        socket.on('telemetry', (data) => {
+            const ts = data.timestamp;  // Use the formatted string timestamp directly
+            
+            // Update status display (use GPSSpeed for display)
+            document.getElementById('speed').textContent = Math.round(data.GPSSpeed);
+            document.getElementById('throttle').textContent = Math.round(data.aps) + '%';
+            document.getElementById('gear').textContent = data.fokozat === 0 ? 'N' : data.fokozat;
+            document.getElementById('rssi').textContent = Math.round(data.rssi);
+            
+            // Update individual charts (use GPSSpeed instead of sebesseg)
+            if (charts.speed) addDataToChart(charts.speed, ts, data.GPSSpeed);
+            if (charts.throttle) addDataToChart(charts.throttle, ts, data.aps);
+            if (charts.gear) addDataToChart(charts.gear, ts, data.fokozat);
+            if (charts.accel) addDataToChart(charts.accel, ts, data.gyorsulas);
+            
+            if (charts.agt) addDataToChart(charts.agt, ts, data.agt);
+            if (charts.egt) addDataToChart(charts.egt, ts, data.egt);
+            if (charts.water) addDataToChart(charts.water, ts, data.vizho);
+            if (charts.oil_temp) addDataToChart(charts.oil_temp, ts, data.olajh);
+            
+            if (charts.oil_pressure) addDataToChart(charts.oil_pressure, ts, data.olajnyomas);
+            if (charts.brake) addDataToChart(charts.brake, ts, data.feknyomas);
+            
+            if (charts.fuel) addDataToChart(charts.fuel, ts, data.uzemanyagny);
+            if (charts.lambda) addDataToChart(charts.lambda, ts, data.lambda);
+            
+            if (charts.voltage) addDataToChart(charts.voltage, ts, data.feszultseg);
+            
+            if (charts.rssi) addDataToChart(charts.rssi, ts, data.rssi);
+            if (charts.snr) addDataToChart(charts.snr, ts, data.snr);
+            if (carMarker && data.latitude && data.longitude) {
+                const newPos = [data.latitude, data.longitude];
+                carMarker.setLatLng(newPos);
+                
+                // Center map on car marker
+                if (map) {
+                    map.setView(newPos, map.getZoom());
+                }
+                
+                // Update circle if it exists
+                if (carCircle) {
+                    carCircle.setLatLng(newPos);
+                }
+                
+                // Rotate car based on heading
+                if (data.heading !== undefined) {
+                    const markerElement = carMarker.getElement();
+                    if (markerElement) {
+                        markerElement.style.transform = `rotate(${data.heading + 90}deg)`;
+                    }
+                }
+                
+                console.log('Car updated:', newPos, 'heading:', data.heading);
+            }
+
+        });
+        
+        // Initialize on load
+        window.addEventListener('load', initGrid);
+    </script>
+</body>
+</html>

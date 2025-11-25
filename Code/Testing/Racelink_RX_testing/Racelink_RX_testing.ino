@@ -1,18 +1,11 @@
-/*
- * LR1121 RX with BLE Reporting via nRF Connect - IMPROVED
- * - Better BLE message chunking (handles MTU properly)
- * - Complete messages now appear in nRF Connect
- * - Change radio settings via BLE (send 1-6)
- * - Receive RSSI/SNR/FreqError reports over BLE
- */
+// Racelink RX Stable sketch
 
 #include <RadioLib.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+#include <FastLED.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
-// LR1121 Pin Definitions
+// SPI + LR1121 Defines
 #define LR_SCK   6
 #define LR_MOSI  4
 #define LR_MISO  5
@@ -21,407 +14,392 @@
 #define LR_NRST  2
 #define LR_IRQ   1
 
-// BLE UUIDs
-#define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // Nordic UART Service
-#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+// WS2812 ARGB LED defines
+#define NUM_LEDS 1
+#define DATA_PIN 8
+CRGB leds[NUM_LEDS];
 
-// Radio setup
 static SPISettings SLOW(500000, MSBFIRST, SPI_MODE0);
 static Module mod(LR_NSS, LR_IRQ, LR_NRST, LR_BUSY, SPI, SLOW);
 static LR1121 radio(&mod);
 static const uint8_t XR1_RFSW[8] = { 15, 0, 12, 8, 8, 6, 0, 5 };
 
-// BLE variables
-BLEServer* pServer = NULL;
-BLECharacteristic* pTxCharacteristic;
-bool deviceConnected = false;
-bool oldDeviceConnected = false;
-uint8_t currentSetting = 4; // Default setting
-int st = 0;
+volatile bool receivedFlag = false;
+bool telemAvailable = false;
+bool newDataAvailable = false;
+SemaphoreHandle_t radioMutex = NULL;\
+volatile uint32_t pktCount = 0;
 
-// RX statistics
-uint32_t packetCount = 0;
-uint32_t lostPackets = 0;
-uint8_t lastReceivedData = 0xFF;
-unsigned long lastPacketTime = 0;
+float latestRSSI = 0;
+float latestSNR = 0;
 
-// BLE Server callbacks
-class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      deviceConnected = true;
-    };
-
-    void onDisconnect(BLEServer* pServer) {
-      deviceConnected = false;
-    }
+//--------------RADIO CONFIG STRUCT-------------
+#pragma pack(1)
+struct RadioConfig {
+    float frequency;
+    float bandwidth;
+    uint8_t spreadingFactor;
+    int8_t txPower;
 };
-
-// Forward declarations
-void lr1121_setup(uint8_t setting);
-void xr1_apply_rfsw();
-const char* getSettingDescription(uint8_t setting);
-void sendBLEMessage(const char* message);
-
-// BLE Characteristic callbacks
-class MyCallbacks: public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic *pCharacteristic) {
-      String rxValueStr = pCharacteristic->getValue();
-      
-      if (rxValueStr.length() > 0) {
-        char cmd = rxValueStr[0];
-        
-        // Check if it's a setting command (1-6)
-        if (cmd >= '1' && cmd <= '6') {
-          currentSetting = cmd - '0';
-          Serial.printf("BLE: Received setting %d\n", currentSetting);
-          
-          // Apply new settings
-          lr1121_setup(currentSetting);
-          xr1_apply_rfsw();
-          
-          // Send confirmation back
-          char response[100];
-          snprintf(response, sizeof(response), 
-                   "Setting %d applied: %s\n", 
-                   currentSetting, 
-                   getSettingDescription(currentSetting));
-          
-          sendBLEMessage(response);
-          
-          // Reset statistics for new test
-          packetCount = 0;
-          lostPackets = 0;
-          lastReceivedData = 0xFF;
-        }
-        // Reset stats command
-        else if (cmd == 'R' || cmd == 'r') {
-          packetCount = 0;
-          lostPackets = 0;
-          lastReceivedData = 0xFF;
-          sendBLEMessage("Stats reset\n");
-        }
-      }
-    }
+struct telemetryPkt{           // 1-telemetry
+  uint8_t agt;
+  int8_t lambda;
+  uint8_t sebesseg;
+  uint16_t feszultseg;
+  uint16_t egt;
+  uint8_t fokozat;
+  uint8_t olajny;
+  uint8_t olajh;
+  uint8_t uzemanyagny;
+  int8_t gyorsulas;
+  uint8_t vizho;              
+  uint8_t aps;
+  uint8_t feknyomas;
+  bool upshift;
+  bool downshift;
+  uint8_t GPSSpeed;
+  uint8_t GPSSats;
+  uint8_t GPSHDOP;
+  int32_t GPSLat;
+  int32_t GPSLng;
+  uint8_t GPSHour;
+  uint8_t GPSMinute;
+  uint8_t GPSSecond;
+  uint16_t GPSMillisecond;
+  int8_t LoRaRssi;
+  uint8_t LoRaSnr;
+  uint8_t LoRaPktRate;
 };
+#pragma pack()
+RadioConfig cfg;
+telemetryPkt telem;
 
+uint8_t RXBuf[sizeof(telemetryPkt)];
+
+/*
+     ___ _____ ___  ___   ___ ___  ___ _____ ___  ___ 
+    | _ \_   _/ _ \/ __| | _ \ _ \/ _ \_   _/ _ \/ __|
+    |   / | || (_) \__ \ |  _/   / (_) || || (_) \__ \
+    |_|_\ |_| \___/|___/ |_| |_|_\\___/ |_| \___/|___/
+*/
+void configBroadcastTask(void *pvParameters);
+void telemetryReceiveTask(void *pvParameters);
+void calcPktRateTask(void *pvParameters);
+void LEDTask(void *pvParameters);
+void SendTelemUartTask(void *pvParameters);
+
+/*
+     ___ _   _ _  _  ___ _____ ___ ___  _  _   ___ ___  ___ _____ ___  ___ 
+    | __| | | | \| |/ __|_   _|_ _/ _ \| \| | | _ \ _ \/ _ \_   _/ _ \/ __|
+    | _|| |_| | .` | (__  | |  | | (_) | .` | |  _/   / (_) || || (_) \__ \
+    |_|  \___/|_|\_|\___| |_| |___\___/|_|\_| |_| |_|_\\___/ |_| \___/|___/                                                            
+*/
+static void lr1121_send_rfsw(const uint8_t cfg[8]);
+void lr1121_default_setup(uint32_t st);
+void lr1121_setup(uint32_t st);
+void lr1121_get_setup(void);
+void lr1121_send_setup(void);
+void setFlag(void);
+void configBroadcastTask(void *pvParameters);
+/*
+     ___ ___ _____ _   _ ___ 
+    / __| __|_   _| | | | _ \
+    \__ \ _|  | | | |_| |  _/
+    |___/___| |_|  \___/|_|  
+                         
+*/
 void setup() {
   Serial.begin(115200);
-  delay(1000);
-  Serial.println("=== LR1121 RX with BLE Reporting (IMPROVED) ===\n");
-
-  // Initialize BLE
-  initBLE();
-  
-  // Initialize Radio
+  delay(100);
+  FastLED.addLeds<WS2812, DATA_PIN, RGB>(leds, NUM_LEDS);
   SPI.begin(LR_SCK, LR_MISO, LR_MOSI, LR_NSS);
   delay(300);
-  
   radio.XTAL = true;
-  radio.setRegulatorDCDC();
-  st = radio.begin();
+  int st = radio.begin();
   
   if (st == RADIOLIB_ERR_NONE) {
-    Serial.println("[SUCCESS] Radio initialized");
-    sendBLEMessage("Radio initialized\n");
+    Serial.println("[SUCCESS] Radio initialized\n");
   } else {
-    Serial.print("[ERROR] Init failed: ");
+    Serial.print("[ERROR] Init failed, code: ");
     Serial.println(st);
-    sendBLEMessage("Radio init failed!");
     while (true) { delay(10); }
   }
-
-  // Configure LoRa with default setting
+  radio.setPacketReceivedAction(setFlag);
+  radio.setRegulatorDCDC();
   st = radio.setModem(RADIOLIB_MODEM_LORA);
-  lr1121_setup(currentSetting);
+  if (st != RADIOLIB_ERR_NONE) {
+    Serial.print("  Error setting modem: ");
+    Serial.println(st);
+  }
   xr1_apply_rfsw();
+  lr1121_default_setup(st);
+  lr1121_get_setup();
+  lr1121_send_setup();
+  lr1121_setup(st); 
   
-  // Send initial status
-  char msg[100];
-  snprintf(msg, sizeof(msg), "RX Ready - Setting %d: %s\n", 
-           currentSetting, getSettingDescription(currentSetting));
-  sendBLEMessage(msg);
-}
+  radioMutex = xSemaphoreCreateMutex();
+  xTaskCreate(configBroadcastTask, "ConfigBroadcast", 2048, NULL, 2, NULL);
+  xTaskCreate(telemetryReceiveTask, "TelemetryRx", 3072, NULL, 1, NULL);
+  xTaskCreate(calcPktRateTask, "PacketRateCnt", 2048, NULL, 2, NULL);
+  xTaskCreate(LEDTask, "LEDTask", 2048, NULL, 2, NULL);
+  xTaskCreate(SendTelemUartTask, "telemuart", 3072, NULL, 1, NULL);
+  Serial.println("[RX] Tasks created, scheduler running");
 
-void loop() {
-  // Handle BLE disconnection
-  if (!deviceConnected && oldDeviceConnected) {
-    delay(500);
-    pServer->startAdvertising();
-    Serial.println("BLE: Start advertising");
-    oldDeviceConnected = deviceConnected;
-  }
-  
-  if (deviceConnected && !oldDeviceConnected) {
-    oldDeviceConnected = deviceConnected;
-    Serial.println("BLE: Device connected");
-    
-    // Send current status
-    char msg[100];
-    snprintf(msg, sizeof(msg), "Connected! Setting %d active\n", currentSetting);
-    sendBLEMessage(msg);
-  }
-
-  // Receive packet with 500ms timeout
-  uint8_t data;
-  int state = radio.receive(&data, 1, 500);
-
-  if (state == RADIOLIB_ERR_NONE) {
-    packetCount++;
-    
-    // Check for lost packets (assuming sequential data)
-    if (lastReceivedData != 0xFF) {
-      uint8_t expectedData = (lastReceivedData + 1) & 0xFF;
-      if (data != expectedData) {
-        uint8_t missed = (data > expectedData) ? 
-                         (data - expectedData - 1) : 
-                         (256 - expectedData + data - 1);
-        lostPackets += missed;
-        
-        Serial.printf("  [WARNING] Detected %d lost packets\n", missed);
-      }
-    }
-    lastReceivedData = data;
-    lastPacketTime = millis();
-    
-    // Read signal quality immediately
-    float rssi = radio.getRSSI();
-    float snr = radio.getSNR();
-    float freqError = radio.getFrequencyError();
-    
-    // Calculate packet loss rate
-    float lossRate = 0;
-    if (packetCount + lostPackets > 0) {
-      lossRate = (float)lostPackets * 100.0 / (packetCount + lostPackets);
-    }
-    
-    // Print to Serial
-    Serial.printf("═══ Packet #%lu ═══\n", packetCount);
-    Serial.printf("  Data: 0x%02X\n", data);
-    Serial.printf("  RSSI: %.1f dBm\n", rssi);
-    Serial.printf("  SNR:  %.2f dB\n", snr);
-    Serial.printf("  Freq Error: %.1f Hz\n", freqError);
-    Serial.printf("  Loss Rate: %.1f%%\n", lossRate);
-    
-    // Send via BLE in readable format
-    if (deviceConnected) {
-      char bleMsg[120];
-      snprintf(bleMsg, sizeof(bleMsg), 
-               "#%lu: 0x%02X | RSSI:%.1f | SNR:%.1f | FE:%.0f | Loss:%.1f%%\n",
-               packetCount, data, rssi, snr, freqError, lossRate);
-      sendBLEMessage(bleMsg);
-    }
-    
-  } else if (state == RADIOLIB_ERR_RX_TIMEOUT) {
-    // Check if we're missing packets (no rx for > 2 seconds when we had packets before)
-    if (lastPacketTime > 0 && (millis() - lastPacketTime) > 2000) {
-      Serial.print("!");  // Signal loss indicator
-      
-      // Send timeout notification every 5 seconds
-      static unsigned long lastTimeoutMsg = 0;
-      if (millis() - lastTimeoutMsg > 5000) {
-        if (deviceConnected) {
-          char msg[80];
-          snprintf(msg, sizeof(msg), "No signal for %lu sec (Pkts:%lu Lost:%lu)\n", 
-                   (millis() - lastPacketTime) / 1000,
-                   packetCount, lostPackets);
-          sendBLEMessage(msg);
-        }
-        lastTimeoutMsg = millis();
-      }
-    } else {
-      Serial.print(".");  // Normal waiting
-    }
-    
-  } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
-    Serial.println("[ERROR] CRC mismatch");
-    if (deviceConnected) {
-      sendBLEMessage("CRC Error!\n");
-    }
-    
+  Serial.print(F("[LR1121] Starting to listen ... "));
+  st = radio.startReceive();
+  if (st == RADIOLIB_ERR_NONE) {
+    Serial.println(F("success!"));
   } else {
-    Serial.printf("[ERROR] RX error: %d\n", state);
-    if (deviceConnected) {
-      char msg[32];
-      snprintf(msg, sizeof(msg), "RX Error: %d\n", state);
-      sendBLEMessage(msg);
-    }
+    Serial.print(F("failed, code "));
+    Serial.println(st);
+    while (true) { delay(10); }
   }
-  
-  delay(50); // Small delay between receive attempts
+  Serial.print(F("entering loop"));
 }
-
-void initBLE() {
-  BLEDevice::init("LR1121_RX");
-  
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
-  
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-  
-  pTxCharacteristic = pService->createCharacteristic(
-                      CHARACTERISTIC_UUID_TX,
-                      BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ
-                    );
-  pTxCharacteristic->addDescriptor(new BLE2902());
-  
-  BLECharacteristic * pRxCharacteristic = pService->createCharacteristic(
-                                           CHARACTERISTIC_UUID_RX,
-                                           BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
-                                         );
-  pRxCharacteristic->setCallbacks(new MyCallbacks());
-  
-  pService->start();
-  pServer->getAdvertising()->start();
-  
-  Serial.println("BLE: Waiting for connections...");
-  Serial.println("     Name: LR1121_RX");
+/*
+     _    ___   ___  ___ 
+    | |  / _ \ / _ \| _ \
+    | |_| (_) | (_) |  _/
+    |____\___/ \___/|_|  
+*/
+void loop() {
+  delay(1000);
 }
 
 /*
- * IMPROVED sendBLEMessage - properly chunks messages for BLE MTU
- * 
- * Standard BLE has MTU of 20 bytes + 3 bytes overhead = 17 bytes data per packet
- * However, to be safer and ensure message completion, we use 16 bytes per chunk
- * and add a delimiter (newline) to help apps reassemble messages properly
- */
-void sendBLEMessage(const char* message) {
-  if (!deviceConnected || !pTxCharacteristic) {
-    return;
+     ___ _____ ___  ___   _____ _   ___ _  _____ 
+    | _ \_   _/ _ \/ __| |_   _/_\ / __| |/ / __|
+    |   / | || (_) \__ \   | |/ _ \\__ \ ' <\__ \
+    |_|_\ |_| \___/|___/   |_/_/ \_\___/_|\_\___/                                       
+*/
+void configBroadcastTask(void *pvParameters) {
+  while(1) {
+      xSemaphoreTake(radioMutex, portMAX_DELAY);
+      lr1121_default_setup(0);
+      lr1121_send_setup();
+      lr1121_setup(0);
+      radio.startReceive();
+      xSemaphoreGive(radioMutex);
+      vTaskDelay(pdMS_TO_TICKS(10000));  // 10 seconds
   }
+}
 
-  size_t len = strlen(message);
-  if (len == 0) return;
+void telemetryReceiveTask(void *pvParameters) {
+  while(1) {
+    // check if the flag is set
+    if(receivedFlag) {
+      // reset flag
+      xSemaphoreTake(radioMutex, portMAX_DELAY);
+      receivedFlag = false;
+      int state = radio.readData(RXBuf, sizeof(telemetryPkt));
+      xSemaphoreGive(radioMutex);
+      if (state == RADIOLIB_ERR_NONE) {
+        newDataAvailable = true;
+        // packet was successfully received
+        Serial.println(F("[LR1121] Received packet!"));
+        pktCount++;
+        telemAvailable = true;
 
-  // Standard BLE MTU is 20 bytes (23 with L2CAP header)
-  // Safe chunk size is 16 bytes to account for overhead
-  const size_t CHUNK_SIZE = 16;
-  
-  // If message fits in one chunk, send it directly
-  if (len <= CHUNK_SIZE) {
-    pTxCharacteristic->setValue((uint8_t*)message, len);
-    pTxCharacteristic->notify();
-    delay(20); // Allow time for notification to be sent
-    return;
-  }
+        Serial.print(F("[LR1121] RSSI:\t\t"));
+        latestRSSI = radio.getRSSI();
+        latestSNR = radio.getSNR();
+        Serial.print(latestRSSI);
+        Serial.println(F(" dBm"));
 
-  // For longer messages, send in chunks
-  size_t offset = 0;
-  
-  while (offset < len) {
-    size_t remaining = len - offset;
-    size_t chunkLen = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
-    
-    // Try to avoid cutting in the middle of a line if possible
-    if (chunkLen == CHUNK_SIZE && offset + chunkLen < len) {
-      // Look backward from the end of this chunk for a newline or space
-      for (int i = CHUNK_SIZE - 1; i > CHUNK_SIZE / 2; i--) {
-        if (message[offset + i] == '\n' || message[offset + i] == ' ') {
-          if (message[offset + i] == '\n') {
-            chunkLen = i + 1;  // Include the newline
-          } else {
-            chunkLen = i;      // Stop before the space
-          }
-          break;
-        }
+        Serial.print(F("[LR1121] SNR:\t\t"));
+        Serial.print(radio.getSNR());
+        Serial.println(F(" dB"));
+
+      } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+        // packet was received, but is malformed
+        Serial.println(F("CRC error!"));
+        telemAvailable = false;
+      } else {
+        // some other error occurred
+        Serial.print(F("failed, code "));
+        Serial.println(state);
+        telemAvailable = false;
       }
     }
-    
-    // Send this chunk
-    pTxCharacteristic->setValue((uint8_t*)(message + offset), chunkLen);
-    pTxCharacteristic->notify();
-    
-    offset += chunkLen;
-    
-    // Add delay between chunks to allow buffer processing
-    if (offset < len) {
-      delay(25); // 25ms between chunks gives BLE stack time to process
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+void LEDTask(void *pvParameters)
+{
+  while(1) {
+    if(latestRSSI != 0) {
+      leds[0] = rssiToColor(latestRSSI);
+      FastLED.show();
     }
-  }
-  
-  // Send final delimiter to signal end of message
-  if (message[len - 1] != '\n') {
-    delay(25);
-    const uint8_t delimiter[] = {'\n'};
-    pTxCharacteristic->setValue((uint8_t*)delimiter, 1);
-    pTxCharacteristic->notify();
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
-const char* getSettingDescription(uint8_t setting) {
-  switch (setting) {
-    case 1: return "2.45GHz BW812.5 SF5";
-    case 2: return "2.45GHz BW812.5 SF7";
-    case 3: return "2.45GHz BW406.25 SF7";
-    case 4: return "868MHz BW500 SF6";
-    case 5: return "868MHz BW500 SF8";
-    case 6: return "868MHz BW250 SF8";
-    default: return "Unknown";
+void calcPktRateTask(void *pvParameters)
+{
+  TickType_t lastWake = xTaskGetTickCount();
+  uint32_t countSnapshot;
+  while (1) {
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
+    countSnapshot = pktCount;
+    pktCount = 0;
+    Serial.print("packets per second:\t");
+    Serial.println(countSnapshot);
   }
 }
 
-void lr1121_setup(uint8_t setting) {
-  st = 0;
-  switch (setting) {
-    case 1: 
-      st |= radio.setFrequency(2450.0);
-      st |= radio.setBandwidth(812.5, true);
-      st |= radio.setSpreadingFactor(5);
-      st |= radio.setOutputPower(13);
-      break;
-    case 2: 
-      st |= radio.setFrequency(2450.0);
-      st |= radio.setBandwidth(812.5, true);
-      st |= radio.setSpreadingFactor(7);
-      st |= radio.setOutputPower(13);
-      break;
-    case 3: 
-      st |= radio.setFrequency(2450.0);
-      st |= radio.setBandwidth(406.25);
-      st |= radio.setSpreadingFactor(7);
-      st |= radio.setOutputPower(13);
-      break;
-    case 4: 
-      st |= radio.setFrequency(868.5);
-      st |= radio.setBandwidth(500.0);
-      st |= radio.setSpreadingFactor(6);
-      st |= radio.setOutputPower(22);
-      break;
-    case 5: 
-      st |= radio.setFrequency(868.5);
-      st |= radio.setBandwidth(500.0);
-      st |= radio.setSpreadingFactor(8);
-      st |= radio.setOutputPower(22);
-      break;
-    case 6: 
-      st |= radio.setFrequency(868.5);
-      st |= radio.setBandwidth(250.0);
-      st |= radio.setSpreadingFactor(8);
-      st |= radio.setOutputPower(22);
-      break;                      
-  }
-  st |= radio.setCodingRate(6);
-  st |= radio.setSyncWord(RADIOLIB_LR11X0_LORA_SYNC_WORD_PUBLIC);
-  st |= radio.setPreambleLength(8);
-  st |= radio.setCRC(true);
-  radio.explicitHeader();
-  radio.invertIQ(false);
-  
-  if (st != RADIOLIB_ERR_NONE) {
-    Serial.printf("Setting %d config error: %d\n", setting, st);
+void SendTelemUartTask(void *pvParameters)
+{
+  while(1){
+    if(telemAvailable){
+      if (newDataAvailable){
+        newDataAvailable = false;
+        memcpy(&telem, RXBuf, sizeof(telemetryPkt));
+        telem.LoRaRssi = latestRSSI;
+        telem.LoRaSnr = latestSNR;
+        Serial.printf("Packet received: \n");
+        Serial.printf("RSSI: %d \n", telem.LoRaRssi);
+        Serial.printf("LAT: %lf \n", (float)telem.GPSLat/1000000L);
+        Serial.printf("LNG: %lf \n", (float)telem.GPSLng/1000000L);
+        Serial.printf("Sats: %d \n", telem.GPSSats);
+        Serial.printf("Shifter: %d \n", telem.fokozat);
+      }
+    }else{
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
+
+
+/*
+     ___ _   _ _  _  ___ _____ ___ ___  _  _ ___ 
+    | __| | | | \| |/ __|_   _|_ _/ _ \| \| / __|
+    | _|| |_| | .` | (__  | |  | | (_) | .` \__ \
+    |_|  \___/|_|\_|\___| |_| |___\___/|_|\_|___/
+*/
+//-------------------------RF SWITCH-------------------------------
 static void lr1121_send_rfsw(const uint8_t cfg[8]) {
   while (digitalRead(LR_BUSY)) {}
   digitalWrite(LR_NSS, LOW);
-  SPI.transfer(0x01); 
-  SPI.transfer(0x12); // SYSTEM_SET_DIO_AS_RF_SWITCH
+  SPI.transfer(0x01); SPI.transfer(0x12);            // SYSTEM_SET_DIO_AS_RF_SWITCH
   for (int i = 0; i < 8; i++) SPI.transfer(cfg[i]);
   digitalWrite(LR_NSS, HIGH);
   while (digitalRead(LR_BUSY)) {}
 }
-
 void xr1_apply_rfsw() {
   lr1121_send_rfsw(XR1_RFSW);
 }
+
+//-------------------------DEFAULT SETUP----------------------------
+void lr1121_default_setup(uint32_t st)
+{
+  st |= radio.setFrequency(868.5);
+  st |= radio.setBandwidth(250);
+  st |= radio.setSpreadingFactor(7);
+  st |= radio.setCodingRate(6);
+  st |= radio.setSyncWord(RADIOLIB_LR11X0_LORA_SYNC_WORD_PUBLIC);
+  st |= radio.setPreambleLength(8);
+  st |= radio.setCRC(true);
+  st |= radio.setOutputPower(22);
+  radio.explicitHeader();
+  radio.invertIQ(false);
+}
+
+//-------------------------CONFIG SETUP----------------------------
+void lr1121_setup(uint32_t st)
+{
+  st |= radio.setFrequency(cfg.frequency);
+  st |= radio.setBandwidth(cfg.bandwidth, (cfg.frequency < 1000) ? false : true);
+  st |= radio.setSpreadingFactor(cfg.spreadingFactor);
+  st |= radio.setCodingRate(6);
+  st |= radio.setSyncWord(RADIOLIB_LR11X0_LORA_SYNC_WORD_PUBLIC);
+  st |= radio.setPreambleLength(8);
+  st |= radio.setCRC(true);
+  st |= radio.setOutputPower(cfg.txPower);
+  radio.explicitHeader();
+  radio.setRxBoostedGainMode(true); 
+  radio.invertIQ(false);
+}
+
+//----------------------GET CONFIG SETUP----------------------------
+void lr1121_get_setup(void)
+{
+  Serial.println("Waiting for radio parameters");
+  uint16_t buf[4] = {8685,250,7,22};
+/*
+  //GET RADIO PARAMS FROM SERIAL, COMMENTED OUT FOR TESTING 
+  for (uint8_t i = 0; i < 4; i++) {
+    while(!Serial.available()){
+      delay(1);
+    }
+    uint8_t highByte = Serial.read();
+
+    while(!Serial.available()){
+      delay(1);
+    }
+    uint8_t lowByte = Serial.read();
+
+    buf[i] = lowByte | (highByte << 8);
+  }
+*/
+  cfg.frequency = (float)buf[0]/10;
+  switch (buf[1])
+  {
+    case 812: cfg.bandwidth = 812.5; break;
+    case 406: cfg.bandwidth = 406.25; break;
+    case 203: cfg.bandwidth = 203.125; break;
+    case 500: cfg.bandwidth = 500.0; break;
+    case 250: cfg.bandwidth = 250.0; break;
+    case 125: cfg.bandwidth = 125.0; break;
+    case 62:  cfg.bandwidth = 62.5; break;
+    default:
+        (cfg.frequency < 1000) ? cfg.bandwidth = 500.0 : cfg.bandwidth = 812.5;
+        break;
+  }
+  cfg.spreadingFactor = buf[2];
+  cfg.txPower = buf[3];
+
+  Serial.printf("[RX] Config loaded: %.1f MHz, BW%.1f, SF%u, +%d dBm\n", 
+          cfg.frequency, cfg.bandwidth, cfg.spreadingFactor, cfg.txPower);
+}
+
+//----------------------SEND SETUP TO TX ----------------------------
+void lr1121_send_setup(void) {
+    // Pack struct into binary buffer and send 5 times
+    uint8_t buffer[sizeof(RadioConfig)];
+    memcpy(buffer, &cfg, sizeof(RadioConfig));
+    
+    Serial.printf("[RX] Sending config (size: %d bytes)\n", sizeof(RadioConfig));
+    
+    for(int i = 0; i < 3; i++) {
+        radio.transmit(buffer, sizeof(RadioConfig));
+        delay(50);
+    }
+    
+    Serial.println("[RX] Config transmitted");
+}
+
+//----------------------SET RECEIVE FLAG----------------------------
+void setFlag(void) {
+  receivedFlag = true;
+}
+
+CRGB rssiToColor(float rssi) {
+  if (rssi > -30) rssi = -30;
+  if (rssi < -120) rssi = -120;
+  
+  float normalized = (rssi + 120) / 90.0;
+  
+  if (normalized < 0.5) {
+    float t = normalized * 2;
+    // GRB order: (Green, Red, Blue)
+    return CRGB((uint8_t)(255 * t), 255, 0);  // Red → Yellow
+  } else {
+    float t = (normalized - 0.5) * 2;
+    return CRGB(255, (uint8_t)(255 * (1 - t)), 0);  // Yellow → Green
+  }
+}
+

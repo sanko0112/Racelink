@@ -1,11 +1,11 @@
-// Racelink TX experimental sketch
+// Racelink RX
 
 #include <RadioLib.h>
 #include <FastLED.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// SPI + LR1121 Defines
+// SPI + LR1121 Macros
 #define LR_SCK   6
 #define LR_MOSI  4
 #define LR_MISO  5
@@ -14,49 +14,92 @@
 #define LR_NRST  2
 #define LR_IRQ   1
 
-// WS2812 ARGB LED defines
+// WS2812 ARGB LED macros
 #define NUM_LEDS 1
 #define DATA_PIN 8
 CRGB leds[NUM_LEDS];
 
+//===========================SPI Setup===========================
 static SPISettings SLOW(500000, MSBFIRST, SPI_MODE0);
 static Module mod(LR_NSS, LR_IRQ, LR_NRST, LR_BUSY, SPI, SLOW);
 static LR1121 radio(&mod);
 static const uint8_t XR1_RFSW[8] = { 15, 0, 12, 8, 8, 6, 0, 5 };
 
 volatile bool receivedFlag = false;
-SemaphoreHandle_t radioMutex = NULL;\
-
+bool telemAvailable = false;
+bool newDataAvailable = false;
+SemaphoreHandle_t radioMutex = NULL;
 volatile uint32_t pktCount = 0;
 
 float latestRSSI = 0;
+float latestSNR = 0;
 
-//--------------RADIO CONFIG STRUCT-------------
-#pragma pack(1)
-struct RadioConfig {
+
+#pragma pack(1)                 // Pack struct
+
+struct RadioConfig {            // RADIO CONFIG STRUCT
     float frequency;
     float bandwidth;
     uint8_t spreadingFactor;
     int8_t txPower;
 };
+
+struct telemetryPkt{           // TELEMETRY PACKET STRUCT
+  uint8_t agt;
+  int8_t lambda;
+  uint8_t sebesseg;
+  uint16_t feszultseg;
+  uint16_t egt;
+  uint8_t fokozat;
+  uint8_t olajny;
+  uint8_t olajh;
+  uint8_t uzemanyagny;
+  int8_t gyorsulas;
+  uint8_t vizho;              
+  uint8_t aps;
+  uint8_t feknyomas;
+  bool upshift;
+  bool downshift;
+  uint8_t GPSSpeed;
+  uint8_t GPSSats;
+  uint8_t GPSHDOP;
+  int32_t GPSLat;
+  int32_t GPSLng;
+  uint8_t GPSHour;
+  uint8_t GPSMinute;
+  uint8_t GPSSecond;
+  uint16_t GPSMillisecond;
+  int8_t LoRaRssi;
+  uint8_t LoRaSnr;
+  uint8_t LoRaPktRate;
+};
 #pragma pack()
 RadioConfig cfg;
+telemetryPkt telem;
+
+uint8_t RXBuf[sizeof(telemetryPkt)];  // Receive buffer
+
+// UART Framing constants
+const uint8_t SYNC_BYTE_1 = 0xAA;
+const uint8_t SYNC_BYTE_2 = 0x55;
+
 /*
-     ___ _____ ___  ___   ___ ___  ___ _____ ___  ___ 
-    | _ \_   _/ _ \/ __| | _ \ _ \/ _ \_   _/ _ \/ __|
-    |   / | || (_) \__ \ |  _/   / (_) || || (_) \__ \
-    |_|_\ |_| \___/|___/ |_| |_|_\\___/ |_| \___/|___/
+     ___ _____ ___  ___    ___ ___  ___ _____ ___  ___ 
+    | _ \_   _/ _ \/ __|  | _ \ _ \/ _ \_   _/ _ \/ __|
+    |   / | || (_) \__ \  |  _/   / (_) || || (_) \__ \  
+    |_|_\ |_| \___/|___/  |_| |_|_\\___/ |_| \___/|___/ 
 */
 void configBroadcastTask(void *pvParameters);
 void telemetryReceiveTask(void *pvParameters);
 void calcPktRateTask(void *pvParameters);
 void LEDTask(void *pvParameters);
+void SendTelemUartTask(void *pvParameters);
 
 /*
-     ___ _   _ _  _  ___ _____ ___ ___  _  _   ___ ___  ___ _____ ___  ___ 
-    | __| | | | \| |/ __|_   _|_ _/ _ \| \| | | _ \ _ \/ _ \_   _/ _ \/ __|
-    | _|| |_| | .` | (__  | |  | | (_) | .` | |  _/   / (_) || || (_) \__ \
-    |_|  \___/|_|\_|\___| |_| |___\___/|_|\_| |_| |_|_\\___/ |_| \___/|___/                                                            
+     ___ _   _ _  _  ___ _____ ___ ___  _  _    ___ ___  ___ _____ ___  ___ 
+    | __| | | | \| |/ __|_   _|_ _/ _ \| \| |  | _ \ _ \/ _ \_   _/ _ \/ __|
+    | _|| |_| | .` | (__  | |  | | (_) | .` |  |  _/   / (_) || || (_) \__ \
+    |_|  \___/|_|\_|\___| |_| |___\___/|_|\_|  |_| |_|_\\___/ |_| \___/|___/                                                            
 */
 static void lr1121_send_rfsw(const uint8_t cfg[8]);
 void lr1121_default_setup(uint32_t st);
@@ -64,7 +107,8 @@ void lr1121_setup(uint32_t st);
 void lr1121_get_setup(void);
 void lr1121_send_setup(void);
 void setFlag(void);
-void configBroadcastTask(void *pvParameters);
+uint8_t calculateChecksum(uint8_t* data, size_t len);
+
 /*
      ___ ___ _____ _   _ ___ 
     / __| __|_   _| | | | _ \
@@ -106,6 +150,7 @@ void setup() {
   xTaskCreate(telemetryReceiveTask, "TelemetryRx", 3072, NULL, 1, NULL);
   xTaskCreate(calcPktRateTask, "PacketRateCnt", 2048, NULL, 2, NULL);
   xTaskCreate(LEDTask, "LEDTask", 2048, NULL, 2, NULL);
+  xTaskCreate(SendTelemUartTask, "telemuart", 3072, NULL, 1, NULL);
   Serial.println("[RX] Tasks created, scheduler running");
 
   Serial.print(F("[LR1121] Starting to listen ... "));
@@ -119,6 +164,7 @@ void setup() {
   }
   Serial.print(F("entering loop"));
 }
+
 /*
      _    ___   ___  ___ 
     | |  / _ \ / _ \| _ \
@@ -130,23 +176,25 @@ void loop() {
 }
 
 /*
-     ___ _____ ___  ___   _____ _   ___ _  _____ 
-    | _ \_   _/ _ \/ __| |_   _/_\ / __| |/ / __|
-    |   / | || (_) \__ \   | |/ _ \\__ \ ' <\__ \
-    |_|_\ |_| \___/|___/   |_/_/ \_\___/_|\_\___/                                       
+     ___ _____ ___  ___    _____ _   ___ _  _____ 
+    | _ \_   _/ _ \/ __|  |_   _/_\ / __| |/ / __|
+    |   / | || (_) \__ \    | |/ _ \\__ \ ' <\__ \
+    |_|_\ |_| \___/|___/    |_/_/ \_\___/_|\_\___/                                       
 */
+//=============Send config over LoRa===================
 void configBroadcastTask(void *pvParameters) {
   while(1) {
-     xSemaphoreTake(radioMutex, portMAX_DELAY);
-     lr1121_default_setup(0);
-    lr1121_send_setup();
-    lr1121_setup(0);
-    radio.startReceive();
-    xSemaphoreGive(radioMutex);
-    vTaskDelay(pdMS_TO_TICKS(10000));  // 10 seconds
+      xSemaphoreTake(radioMutex, portMAX_DELAY);
+      lr1121_default_setup(0);
+      lr1121_send_setup();
+      lr1121_setup(0);
+      radio.startReceive();
+      xSemaphoreGive(radioMutex);
+      vTaskDelay(pdMS_TO_TICKS(10000));  // 10 seconds
   }
 }
 
+//================Receive telemetry over LoRa===================
 void telemetryReceiveTask(void *pvParameters) {
   while(1) {
     // check if the flag is set
@@ -154,25 +202,21 @@ void telemetryReceiveTask(void *pvParameters) {
       // reset flag
       xSemaphoreTake(radioMutex, portMAX_DELAY);
       receivedFlag = false;
-      String str;
-      int state = radio.readData(str);
+      int state = radio.readData(RXBuf, sizeof(telemetryPkt));
       xSemaphoreGive(radioMutex);
       if (state == RADIOLIB_ERR_NONE) {
+        newDataAvailable = true;
         // packet was successfully received
         Serial.println(F("[LR1121] Received packet!"));
         pktCount++;
+        telemAvailable = true;
 
-        // print data of the packet
-        Serial.print(F("[LR1121] Data:\t\t"));
-        Serial.println(str);
-
-        // print RSSI (Received Signal Strength Indicator)
         Serial.print(F("[LR1121] RSSI:\t\t"));
         latestRSSI = radio.getRSSI();
+        latestSNR = radio.getSNR();
         Serial.print(latestRSSI);
         Serial.println(F(" dBm"));
 
-        // print SNR (Signal-to-Noise Ratio)
         Serial.print(F("[LR1121] SNR:\t\t"));
         Serial.print(radio.getSNR());
         Serial.println(F(" dB"));
@@ -180,17 +224,19 @@ void telemetryReceiveTask(void *pvParameters) {
       } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
         // packet was received, but is malformed
         Serial.println(F("CRC error!"));
-
+        telemAvailable = false;
       } else {
         // some other error occurred
         Serial.print(F("failed, code "));
         Serial.println(state);
+        telemAvailable = false;
       }
     }
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
+//=============Set LED Task================
 void LEDTask(void *pvParameters)
 {
   while(1) {
@@ -202,16 +248,48 @@ void LEDTask(void *pvParameters)
   }
 }
 
-void calcPktRateTask(void *pvParameters) {
-    TickType_t lastWake = xTaskGetTickCount();
-    uint32_t countSnapshot;
-    while (1) {
-        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
-        countSnapshot = pktCount;
-        pktCount = 0;
-        Serial.print("packets per second:\t");
-        Serial.println(countSnapshot);
+//============Calculate packet rate task==================
+void calcPktRateTask(void *pvParameters)
+{
+  TickType_t lastWake = xTaskGetTickCount();
+  uint32_t countSnapshot;
+  while (1) {
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
+    countSnapshot = pktCount;
+    pktCount = 0;
+    Serial.print("packets per second:\t");
+    Serial.println(countSnapshot);
+  }
+}
+
+
+//==========================Send telemetry over UART task===============================
+void SendTelemUartTask(void *pvParameters)
+{
+  while(1){
+    if(telemAvailable){
+      if (newDataAvailable){
+        newDataAvailable = false;
+        memcpy(&telem, RXBuf, sizeof(telemetryPkt));
+        telem.LoRaRssi = latestRSSI;
+        telem.LoRaSnr = latestSNR;
+        
+        // Calculate checksum
+        uint8_t checksum = calculateChecksum((uint8_t*)&telem, sizeof(telemetryPkt));
+        
+        // Send framed packet: [SYNC1][SYNC2][SIZE][DATA][CHECKSUM]
+        Serial.write(SYNC_BYTE_1);
+        Serial.write(SYNC_BYTE_2);
+        Serial.write(sizeof(telemetryPkt));
+        Serial.write((uint8_t*)&telem, sizeof(telemetryPkt));
+        Serial.write(checksum);
+        Serial.flush();
+      }
+    }else{
+      vTaskDelay(pdMS_TO_TICKS(100));
     }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
 }
 
 
@@ -222,7 +300,7 @@ void calcPktRateTask(void *pvParameters) {
     | _|| |_| | .` | (__  | |  | | (_) | .` \__ \
     |_|  \___/|_|\_|\___| |_| |___\___/|_|\_|___/
 */
-//-------------------------RF SWITCH-------------------------------
+//=====================RF SWITCH=========================
 static void lr1121_send_rfsw(const uint8_t cfg[8]) {
   while (digitalRead(LR_BUSY)) {}
   digitalWrite(LR_NSS, LOW);
@@ -235,7 +313,7 @@ void xr1_apply_rfsw() {
   lr1121_send_rfsw(XR1_RFSW);
 }
 
-//-------------------------DEFAULT SETUP----------------------------
+//============================DEFAULT SETUP==============================
 void lr1121_default_setup(uint32_t st)
 {
   st |= radio.setFrequency(868.5);
@@ -250,7 +328,7 @@ void lr1121_default_setup(uint32_t st)
   radio.invertIQ(false);
 }
 
-//-------------------------CONFIG SETUP----------------------------
+//=================================CONFIG SETUP=====================================
 void lr1121_setup(uint32_t st)
 {
   st |= radio.setFrequency(cfg.frequency);
@@ -262,14 +340,15 @@ void lr1121_setup(uint32_t st)
   st |= radio.setCRC(true);
   st |= radio.setOutputPower(cfg.txPower);
   radio.explicitHeader();
+  radio.setRxBoostedGainMode(true); 
   radio.invertIQ(false);
 }
 
-//----------------------GET CONFIG SETUP----------------------------
+//=======================GET CONFIG SETUP===========================
 void lr1121_get_setup(void)
 {
   Serial.println("Waiting for radio parameters");
-  uint16_t buf[4] = {24500,812,6,13};
+  uint16_t buf[4] = {8685,250,7,22};
 /*
   //GET RADIO PARAMS FROM SERIAL, COMMENTED OUT FOR TESTING 
   for (uint8_t i = 0; i < 4; i++) {
@@ -307,7 +386,7 @@ void lr1121_get_setup(void)
           cfg.frequency, cfg.bandwidth, cfg.spreadingFactor, cfg.txPower);
 }
 
-//----------------------SEND SETUP TO TX ----------------------------
+//============================SEND SETUP TO TX=================================
 void lr1121_send_setup(void) {
     // Pack struct into binary buffer and send 5 times
     uint8_t buffer[sizeof(RadioConfig)];
@@ -323,11 +402,12 @@ void lr1121_send_setup(void) {
     Serial.println("[RX] Config transmitted");
 }
 
-//----------------------SET RECEIVE FLAG----------------------------
+//===================SET RECEIVE FLAG=======================
 void setFlag(void) {
   receivedFlag = true;
 }
 
+//=====================RSSI TO LED==========================
 CRGB rssiToColor(float rssi) {
   if (rssi > -30) rssi = -30;
   if (rssi < -120) rssi = -120;
@@ -344,3 +424,10 @@ CRGB rssiToColor(float rssi) {
   }
 }
 
+uint8_t calculateChecksum(uint8_t* data, size_t len) {
+  uint8_t checksum = 0;
+  for(size_t i = 0; i < len; i++) {
+    checksum ^= data[i];
+  }
+  return checksum;
+}

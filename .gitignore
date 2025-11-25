@@ -32,5 +32,9 @@ Project Outputs*/
 # Folder to save each comparison results
 CompareHistory/
 
-
+*/config.json
+*.json
 *.AIODUINO.OutJob
+*.OutJob
+
+*.emf
