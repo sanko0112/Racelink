@@ -6,7 +6,6 @@ import threading
 import time
 import json
 import os
-import math
 
 # Load configuration
 with open('config.json', 'r') as f:
@@ -29,7 +28,7 @@ SYNC_BYTE_2 = 0x55
 
 # Telemetry packet structure - must match Arduino struct exactly
 # Total size: 41 bytes
-TELEM_STRUCT_FORMAT = '<BbBHHBBBBbBBBBBBBBiiBBBHbbB'
+TELEM_STRUCT_FORMAT = '<BbBHHBBBBbBBBBBBBBiibbB'
 TELEM_STRUCT_SIZE = struct.calcsize(TELEM_STRUCT_FORMAT)
 
 print(f"Expected packet size: {TELEM_STRUCT_SIZE} bytes")
@@ -57,10 +56,6 @@ FIELD_NAMES = [
     'GPSHDOP',       # uint8_t  - GPS HDOP
     'GPSLat',        # int32_t  - GPS latitude (scaled by 1000000)
     'GPSLng',        # int32_t  - GPS longitude (scaled by 1000000)
-    'GPSHour',       # uint8_t  - GPS hour
-    'GPSMinute',     # uint8_t  - GPS minute
-    'GPSSecond',     # uint8_t  - GPS second
-    'GPSMillisecond',# uint16_t - GPS millisecond
     'LoRaRssi',      # int8_t   - LoRa RSSI
     'LoRaSnr',       # int8_t   - LoRa SNR
     'LoRaPktRate'    # uint8_t  - LoRa packet rate
@@ -68,23 +63,8 @@ FIELD_NAMES = [
 
 ser = None
 connected_clients = 0
-baseline_time = time.time()
-last_lat = None
-last_lon = None
-last_heading = 0
-
-def calculate_bearing(lat1, lon1, lat2, lon2):
-    """Calculate bearing between two points in degrees"""
-    lat1_rad = math.radians(lat1)
-    lat2_rad = math.radians(lat2)
-    dlon_rad = math.radians(lon2 - lon1)
-    
-    y = math.sin(dlon_rad) * math.cos(lat2_rad)
-    x = math.cos(lat1_rad) * math.sin(lat2_rad) - \
-        math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(dlon_rad)
-    
-    bearing = math.degrees(math.atan2(y, x))
-    return (bearing + 360) % 360
+last_packet_time = None
+connection_status = False
 
 def calculate_checksum(data):
     """Calculate XOR checksum"""
@@ -124,8 +104,6 @@ def sync_to_packet(ser):
 
 def parse_telemetry(raw_data):
     """Parse binary telemetry packet into dictionary"""
-    global last_lat, last_lon, last_heading
-    
     try:
         # Unpack binary data according to struct format
         values = struct.unpack(TELEM_STRUCT_FORMAT, raw_data)
@@ -133,12 +111,13 @@ def parse_telemetry(raw_data):
         # Create dictionary with field names
         data = dict(zip(FIELD_NAMES, values))
         
-        # Add timestamp as minutes:seconds.milliseconds
-        current_time = time.time() - baseline_time
-        minutes = int(current_time // 60)
-        seconds = current_time % 60
-        data['timestamp'] = f"{minutes}:{seconds:06.3f}"  # Format: M:SS.mmm
-        data['timestamp_seconds'] = current_time  # Keep numeric for calculations
+        # Get current UTC time
+        import datetime
+        utc_now = datetime.datetime.utcnow()
+        
+        # Format as HH:MM:SS.mmm
+        data['timestamp'] = utc_now.strftime('%H:%M:%S.%f')[:-3]  # Remove last 3 digits of microseconds
+        data['timestamp_seconds'] = utc_now.hour * 3600 + utc_now.minute * 60 + utc_now.second + utc_now.microsecond / 1000000.0
         
         # Convert GPS coordinates from scaled integers to floats
         if data['GPSLat'] != 0 and data['GPSLng'] != 0:
@@ -146,24 +125,9 @@ def parse_telemetry(raw_data):
             lon = data['GPSLng'] / 1000000.0
             data['latitude'] = lat
             data['longitude'] = lon
-            
-            # Calculate heading if we have previous position
-            if last_lat is not None and last_lon is not None:
-                if (lat != last_lat or lon != last_lon):
-                    heading = calculate_bearing(last_lat, last_lon, lat, lon)
-                    data['heading'] = heading
-                    last_heading = heading
-                else:
-                    data['heading'] = last_heading
-            else:
-                data['heading'] = 0
-            
-            last_lat = lat
-            last_lon = lon
         else:
             data['latitude'] = 0
             data['longitude'] = 0
-            data['heading'] = 0
         
         # Convert voltage from millivolts to volts
         data['feszultseg'] = data['feszultseg'] / 1000.0
@@ -190,7 +154,7 @@ def parse_telemetry(raw_data):
 
 def uart_reader():
     """Background thread to read UART data with packet framing"""
-    global ser
+    global ser, last_packet_time, connection_status
     
     if not open_serial():
         print("✗ Waiting 5 seconds before retry...")
@@ -263,6 +227,13 @@ def uart_reader():
             
             if telemetry:
                 packet_count += 1
+                last_packet_time = time.time()  # Update last packet time
+                
+                # Update connection status if needed
+                if not connection_status:
+                    connection_status = True
+                    with app.app_context():
+                        socketio.emit('connection_status', {'connected': True}, namespace='/')
                 
                 # Emit to all connected clients
                 with app.app_context():
@@ -299,6 +270,24 @@ def uart_reader():
                 ser.close()
             break
 
+def connection_monitor():
+    """Monitor connection status based on packet reception"""
+    global last_packet_time, connection_status
+    
+    while True:
+        time.sleep(1)  # Check every second
+        
+        if last_packet_time is not None:
+            time_since_last_packet = time.time() - last_packet_time
+            
+            # If no packet in last 10 seconds, mark as disconnected
+            if time_since_last_packet > 10:
+                if connection_status:
+                    connection_status = False
+                    with app.app_context():
+                        socketio.emit('connection_status', {'connected': False}, namespace='/')
+                    print("⚠ No data received for 10 seconds - marking as disconnected")
+
 @app.route('/')
 def index():
     return render_template('dashboard.html', 
@@ -330,6 +319,10 @@ if __name__ == '__main__':
     # Start UART reader in background thread
     uart_thread = threading.Thread(target=uart_reader, daemon=True)
     uart_thread.start()
+    
+    # Start connection monitor thread
+    monitor_thread = threading.Thread(target=connection_monitor, daemon=True)
+    monitor_thread.start()
     
     # Start Flask-SocketIO server
     try:

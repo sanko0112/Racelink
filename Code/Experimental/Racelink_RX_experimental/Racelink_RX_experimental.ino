@@ -65,10 +65,6 @@ struct telemetryPkt{           // TELEMETRY PACKET STRUCT
   uint8_t GPSHDOP;
   int32_t GPSLat;
   int32_t GPSLng;
-  uint8_t GPSHour;
-  uint8_t GPSMinute;
-  uint8_t GPSSecond;
-  uint16_t GPSMillisecond;
   int8_t LoRaRssi;
   uint8_t LoRaSnr;
   uint8_t LoRaPktRate;

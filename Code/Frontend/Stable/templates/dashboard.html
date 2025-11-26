@@ -53,6 +53,9 @@
             font-size: 20px;
             font-weight: bold;
             text-shadow: 0 0 10px #031fe6;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
         
         .status-bar {
@@ -173,7 +176,7 @@
             color: #031fe6;
             font-size: 12px;
             font-weight: bold;
-            text-transform: uppercase;
+            text-transform: none;
         }
         
         .close-btn {
@@ -324,12 +327,66 @@
         .widget-item-btn.remove:hover {
             background: #ff0000;
         }
+
+        .data-box {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-between;
+            min-height: 70px;
+        }
+
+        .data-box-title {
+            font-size: 10px;
+            color: #aaa;
+            text-transform: none;
+            margin-bottom: 5px;
+        }
+
+        .data-box-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+        }
+
+        .data-box-unit {
+            font-size: 11px;
+            color: #aaa;
+            margin-left: 5px;
+        }
+
+        #rawDataGrid {
+            overflow-y: auto;
+            overflow-x: hidden;
+            max-height: 95%;
+        }
+
+        ::-webkit-scrollbar {
+        width: 10px;
+        }
+
+        /* Track */
+        ::-webkit-scrollbar-track {
+        box-shadow: inset 0 0 5px grey;
+        border-radius: 10px;
+        }
+
+        /* Handle */
+        ::-webkit-scrollbar-thumb {
+        background: #0428ff;
+        border-radius: 10px;
+        }
     </style>
 </head>
 <body>
     <div class="header">
         <div class="header-left">
-            <div class="header-title">🏎️ RaceLink Telemetry</div>
+            <div class="header-title"><img src="static\cropped-338345294_778307876971630_8269203501290917883_n-1.jpg" style="width: 50px;height: 50px;" > RaceLink Telemetry</div>
         </div>
         <div class="status-bar">
             <div class="status-item">
@@ -363,6 +420,10 @@
             <button onclick="toggleWidgetMenu()" class="close-menu-btn">×</button>
         </div>
         <div class="widget-categories">
+            <div class="widget-category">
+                <h4>Raw Data</h4>
+                <div id="category-rawData"></div>
+            </div>
             <div class="widget-category">
                 <h4>Performance</h4>
                 <div id="category-performance"></div>
@@ -398,7 +459,7 @@
         const socket = io();
         let charts = {};
         let grid;
-        const maxDataPoints = 100;
+        const maxDataPoints = 300;
         let isEditMode = false;
 
         let map = null;           // Will store the Leaflet map
@@ -419,34 +480,36 @@
         // Widget definitions - each data point gets its own widget
         const widgets = [
             // Speed & Performance
-            { id: 'speed', title: '🏎️ Speed', x: 0, y: 0, w: 3, h: 3, category: 'performance' },
-            { id: 'throttle', title: '⚡ Throttle Position', x: 3, y: 0, w: 3, h: 3, category: 'performance' },
-            { id: 'gear', title: '⚙️ Gear', x: 6, y: 0, w: 2, h: 3, category: 'performance' },
-            { id: 'accel', title: '💨 Acceleration', x: 8, y: 0, w: 4, h: 3, category: 'performance' },
+            { id: 'speed', title: '<i class="fa-solid fa-gauge-high"></i> Speed', x: 4, y: 0, w: 5, h: 3, category: 'performance' },
+            { id: 'throttle', title: '<i class="fa-solid fa-percent"></i> Throttle Position', x: 3, y: 0, w: 3, h: 3, category: 'performance' },
+            { id: 'gear', title: '<i class="fa-solid fa-gears"></i> Gear', x: 6, y: 0, w: 2, h: 3, category: 'performance' },
+            { id: 'accel', title: '<i class="fa-solid fa-gauge-simple-high"></i> Acceleration', x: 8, y: 0, w: 4, h: 3, category: 'performance' },
             
             // Engine Temps
-            { id: 'agt', title: '🌡️ Air Intake Temp', x: 0, y: 3, w: 3, h: 3, category: 'temps' },
-            { id: 'egt', title: '🔥 Exhaust Temp', x: 3, y: 3, w: 3, h: 3, category: 'temps' },
-            { id: 'water', title: '💧 Water Temp', x: 6, y: 3, w: 3, h: 3, category: 'temps' },
-            { id: 'oil_temp', title: '🛢️ Oil Temp', x: 9, y: 3, w: 3, h: 3, category: 'temps' },
+            { id: 'agt', title: '<i class="fa-solid fa-wind"></i> <i class="fa-solid fa-temperature-high"></i> Air Intake Temp', x: 0, y: 3, w: 3, h: 3, category: 'temps' },
+            { id: 'egt', title: '<i class="fa-solid fa-smog"></i> <i class="fa-solid fa-temperature-high"></i> Exhaust Temp', x: 3, y: 3, w: 3, h: 3, category: 'temps' },
+            { id: 'water', title: '<i class="fa-solid fa-water"></i> <i class="fa-solid fa-temperature-high"></i> Water Temp', x: 4, y: 3, w: 5, h: 3, category: 'temps' },
+            { id: 'oil_temp', title: '<i class="fa-solid fa-oil-can"></i> <i class="fa-solid fa-temperature-high"></i> Oil Temp', x: 9, y: 3, w: 3, h: 3, category: 'temps' },
             
             // Pressures
-            { id: 'oil_pressure', title: '🛢️ Oil Pressure', x: 0, y: 6, w: 3, h: 3, category: 'pressures' },
-            { id: 'brake', title: '🔴 Brake Pressure', x: 3, y: 6, w: 3, h: 3, category: 'pressures' },
+            { id: 'oil_pressure', title: '<i class="fa-solid fa-oil-can"></i> Oil Pressure', x: 0, y: 6, w: 3, h: 3, category: 'pressures' },
+            { id: 'brake', title: '<i class="fa-solid fa-circle-stop"></i> Brake Pressure', x: 3, y: 6, w: 3, h: 3, category: 'pressures' },
             
             // Fuel & Lambda
-            { id: 'fuel', title: '⛽ Fuel Level', x: 6, y: 6, w: 3, h: 3, category: 'fuel' },
-            { id: 'lambda', title: '🔬 Lambda', x: 9, y: 6, w: 3, h: 3, category: 'fuel' },
+            { id: 'fuel', title: '<i class="fa-solid fa-gas-pump"></i> Fuel Level', x: 0, y: 6, w: 3, h: 3, category: 'fuel' },
+            { id: 'lambda', title: ' λ Lambda', x: 6, y: 6, w: 3, h: 3, category: 'fuel' },
             
             // Electrical
-            { id: 'voltage', title: '🔋 Battery Voltage', x: 0, y: 9, w: 3, h: 3, category: 'electrical' },
+            { id: 'voltage', title: '<i class="fa-solid fa-car-battery"></i> Battery Voltage', x: 3, y: 6, w: 3, h: 3, category: 'electrical' },
             
             // Signal Quality
-            { id: 'rssi', title: '📡 RSSI', x: 3, y: 9, w: 3, h: 3, category: 'signal' },
-            { id: 'snr', title: '📶 SNR', x: 6, y: 9, w: 3, h: 3, category: 'signal' },
+            { id: 'rssi', title: '<i class="fa-solid fa-signal"></i> RSSI', x: 3, y: 9, w: 3, h: 3, category: 'signal' },
+            { id: 'snr', title: '<i class="fa-solid fa-wave-square"></i> SNR', x: 6, y: 9, w: 3, h: 3, category: 'signal' },
 
             // MAP
-            { id: 'map', title: '<i class="fa-regular fa-map"></i> Track Map', x: 0 , y: 12, w: 6, h: 4, category:'performance'}
+            { id: 'map', title: '<i class="fa-regular fa-map"></i> Track Map', x: 0 , y: 0, w: 4, h: 6, category:'performance'},
+
+            { id: 'rawData', title: '<i class="fa-solid fa-file-lines"></i> Raw Data', x: 12, y: 0, w: 3, h: 9, category:'rawData'}
 
         ];
         
@@ -462,6 +525,22 @@
                         </div>
                         <div class="chart-wrapper">
                             <div id="trackMap" style="width: 100%; height: 100%;"></div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else if(widget.id === 'rawData') {
+            return ` 
+                <div class="grid-stack-item" gs-id="${widget.id}" gs-x="${widget.x}" gs-y="${widget.y}" gs-w="${widget.w}" gs-h="${widget.h}">
+                    <div class="grid-stack-item-content">
+                        <div class="widget-header">
+                            <div class="chart-title">${widget.title}</div>
+                            <button class="close-btn" onclick="removeWidget('rawData')">×</button>
+                        </div>
+                        <div class="chart-wrapper">
+                            <div id="rawDataGrid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; padding: 10px;">
+                                <!-- Your data boxes will go here -->
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -704,6 +783,9 @@
                     break;
                 case 'map':
                     initMap();
+                    break;
+                case 'rawData':
+                    initRawData();
                     break;    
             }
         }
@@ -827,6 +909,45 @@
             charts.snr = createChart('snr', [
                 { label: 'SNR (dB)', color: colors.cyan, fill: false }
             ]);
+            initMap();
+            initRawData();
+        }
+
+        function createDataBox(id, title, unit) {
+            return `
+                <div class="data-box">
+                    <div class="data-box-title">${title}</div>
+                    <div>
+                        <span class="data-box-value" id="raw-${id}">--</span>
+                        <span class="data-box-unit">${unit}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function initRawData() {
+            const container = document.getElementById('rawDataGrid');
+            if (!container) {
+                console.warn('Raw data container not found');
+                return;
+            }
+            
+            // Create all the data boxes
+            container.innerHTML = 
+                createDataBox('speed', 'Speed', 'km/h') +
+                createDataBox('throttle', 'Throttle', '%') +
+                createDataBox('gear', 'Gear', '') +
+                createDataBox('agt', 'Air Temp', '°C') +
+                createDataBox('egt', 'Exhaust', '°C') +
+                createDataBox('water', 'Water', '°C') +
+                createDataBox('oil_temp', 'Oil Temp', '°C') +
+                createDataBox('oil_pressure', 'Oil Press', 'bar') +
+                createDataBox('brake', 'Brake', 'bar') +
+                createDataBox('fuel', 'Fuel', '%') +
+                createDataBox('lambda', 'Lambda', '') +
+                createDataBox('voltage', 'Voltage', 'V') +
+                createDataBox('rssi', 'RSSI', 'dBm') +
+                createDataBox('snr', 'SNR', 'dB');
         }
 
         function initMap() {
@@ -895,13 +1016,27 @@
 
         // Socket.io handlers
         socket.on('connect', () => {
-            document.getElementById('connectionStatus').textContent = '● Connected';
-            document.getElementById('connectionStatus').className = 'connection-status connected';
+            // Don't change connection status here - wait for actual telemetry data
+            console.log('WebSocket connected to server');
         });
-        
+
         socket.on('disconnect', () => {
+            // WebSocket disconnected - mark as disconnected
             document.getElementById('connectionStatus').textContent = '⊘ Disconnected';
             document.getElementById('connectionStatus').className = 'connection-status disconnected';
+        });
+
+        // NEW: Listen for connection status based on actual telemetry reception
+        socket.on('connection_status', (status) => {
+            if (status.connected) {
+                document.getElementById('connectionStatus').textContent = '● Connected';
+                document.getElementById('connectionStatus').className = 'connection-status connected';
+                console.log('LoRa telemetry connected');
+            } else {
+                document.getElementById('connectionStatus').textContent = '⊘ Disconnected';
+                document.getElementById('connectionStatus').className = 'connection-status disconnected';
+                console.log('LoRa telemetry disconnected - no data received');
+            }
         });
 
         socket.on('telemetry', (data) => {
@@ -958,7 +1093,30 @@
                 
                 console.log('Car updated:', newPos, 'heading:', data.heading);
             }
+            // Update raw data boxes if they exist
+            const rawDataElements = {
+                'raw-speed': data.GPSSpeed,
+                'raw-throttle': data.aps,
+                'raw-gear': data.fokozat === 0 ? 'N' : data.fokozat,
+                'raw-agt': data.agt,
+                'raw-egt': data.egt,
+                'raw-water': data.vizho,
+                'raw-oil_temp': data.olajh,
+                'raw-oil_pressure': data.olajnyomas,
+                'raw-brake': data.feknyomas,
+                'raw-fuel': data.uzemanyagny,
+                'raw-lambda': data.lambda.toFixed(2),
+                'raw-voltage': data.feszultseg.toFixed(2),
+                'raw-rssi': data.rssi,
+                'raw-snr': data.snr
+            };
 
+            Object.keys(rawDataElements).forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.textContent = rawDataElements[id];
+                }
+            });
         });
         
         // Initialize on load

@@ -70,10 +70,6 @@ struct telemetryPkt{
   uint8_t GPSHDOP;
   int32_t GPSLat;
   int32_t GPSLng;
-  uint8_t GPSHour;
-  uint8_t GPSMinute;
-  uint8_t GPSSecond;
-  uint16_t GPSMillisecond;
   int8_t LoRaRssi;
   uint8_t LoRaSnr;
   uint8_t LoRaPktRate;
@@ -356,23 +352,6 @@ void GPSInfo(void)
     Serial.printf("Sats: %d \n", gps.satellites.value());
     }
   if (gps.hdop.isValid())      telem.GPSHDOP = (gps.hdop.hdop()*10);
-
-  if (gps.time.isValid()) {
-    int sec = gps.time.second();
-
-    // Detect new GPS second boundary
-    if (sec != lastSec) {
-        lastSec = sec;
-        secStart = millis();   // latch MCU time
-    }
-
-    telem.GPSHour   = gps.time.hour();
-    telem.GPSMinute = gps.time.minute();
-    telem.GPSSecond = sec;
-
-    // Calculate ms since the start of this GPS second
-    telem.GPSMillisecond = (millis() - secStart) % 1000;
-  }
 }
 
 
