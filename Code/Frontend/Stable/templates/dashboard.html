@@ -390,20 +390,20 @@
         </div>
         <div class="status-bar">
             <div class="status-item">
-                <div class="status-value" id="speed">0</div>
-                <div class="status-label">km/h</div>
-            </div>
-            <div class="status-item">
-                <div class="status-value" id="throttle">0%</div>
-                <div class="status-label">Throttle</div>
-            </div>
-            <div class="status-item">
-                <div class="status-value" id="gear">N</div>
-                <div class="status-label">Gear</div>
+                <div class="status-value" id="snr">-</div>
+                <div class="status-label">SNR</div>
             </div>
             <div class="status-item">
                 <div class="status-value" id="rssi">-</div>
                 <div class="status-label">RSSI</div>
+            </div>
+            <div class="status-item">
+                <div class="status-value" id="pktrate">-</div>
+                <div class="status-label">Packet Rate</div>
+            </div>
+            <div class="status-item">
+                <div class="status-value" id="sats">-</div>
+                <div class="status-label">Sattelites</div>
             </div>
             <div id="connectionStatus" class="connection-status disconnected">⊘ Disconnected</div>
         </div>
@@ -459,7 +459,7 @@
         const socket = io();
         let charts = {};
         let grid;
-        const maxDataPoints = 300;
+        const maxDataPoints = 100;
         let isEditMode = false;
 
         let map = null;           // Will store the Leaflet map
@@ -820,6 +820,7 @@
                     }))
                 },
                 options: {
+                    animation: false,
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: {
@@ -1026,7 +1027,7 @@
             document.getElementById('connectionStatus').className = 'connection-status disconnected';
         });
 
-        // NEW: Listen for connection status based on actual telemetry reception
+        // Listen for connection status based on actual telemetry reception
         socket.on('connection_status', (status) => {
             if (status.connected) {
                 document.getElementById('connectionStatus').textContent = '● Connected';
@@ -1039,14 +1040,18 @@
             }
         });
 
+
         socket.on('telemetry', (data) => {
             const ts = data.timestamp;  // Use the formatted string timestamp directly
             
             // Update status display (use GPSSpeed for display)
-            document.getElementById('speed').textContent = Math.round(data.GPSSpeed);
-            document.getElementById('throttle').textContent = Math.round(data.aps) + '%';
-            document.getElementById('gear').textContent = data.fokozat === 0 ? 'N' : data.fokozat;
+           // document.getElementById('speed').textContent = Math.round(data.GPSSpeed);
+           // document.getElementById('throttle').textContent = Math.round(data.aps) + '%';
+           // document.getElementById('gear').textContent = data.fokozat === 0 ? 'N' : data.fokozat;
             document.getElementById('rssi').textContent = Math.round(data.rssi);
+            document.getElementById('snr').textContent = Math.round(data.snr);
+            document.getElementById('sats').textContent = Math.round(data.GPSSats);
+            document.getElementById('pktrate').textContent = Math.round(data.LoRaPktRate);
             
             // Update individual charts (use GPSSpeed instead of sebesseg)
             if (charts.speed) addDataToChart(charts.speed, ts, data.GPSSpeed);
@@ -1078,11 +1083,6 @@
                     map.setView(newPos, map.getZoom());
                 }
                 
-                // Update circle if it exists
-                if (carCircle) {
-                    carCircle.setLatLng(newPos);
-                }
-                
                 // Rotate car based on heading
                 if (data.heading !== undefined) {
                     const markerElement = carMarker.getElement();
@@ -1105,18 +1105,28 @@
                 'raw-oil_pressure': data.olajnyomas,
                 'raw-brake': data.feknyomas,
                 'raw-fuel': data.uzemanyagny,
-                'raw-lambda': data.lambda.toFixed(2),
-                'raw-voltage': data.feszultseg.toFixed(2),
+                'raw-lambda': data.lambda ? data.lambda.toFixed(2) : '--',
+                'raw-voltage': data.feszultseg ? data.feszultseg.toFixed(2) : '--',
                 'raw-rssi': data.rssi,
                 'raw-snr': data.snr
             };
 
+            let foundCount = 0;
             Object.keys(rawDataElements).forEach(id => {
                 const element = document.getElementById(id);
                 if (element) {
                     element.textContent = rawDataElements[id];
+                    foundCount++;
                 }
             });
+            
+            // Debug: log once per second (at 25Hz packet rate)
+            if (Math.random() < 0.04) {
+                console.log(`Raw data: ${foundCount}/14 elements updated`);
+                if (foundCount === 0) {
+                    console.warn('⚠️ Raw Data widget elements not found - widget may not be initialized');
+                }
+            }
         });
         
         // Initialize on load

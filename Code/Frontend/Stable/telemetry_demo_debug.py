@@ -37,7 +37,7 @@ print(f"Framed packet size: {TELEM_STRUCT_SIZE + 4} bytes (sync + size + data + 
 # Field names matching the struct order
 FIELD_NAMES = [
     'agt',           # uint8_t  - Air intake temp
-    'lambda',        # i`nt8_t   - Lambda
+    'lambda',        # int8_t   - Lambda
     'sebesseg',      # uint8_t  - Speed
     'feszultseg',    # uint16_t - Voltage
     'egt',           # uint16_t - Exhaust temp
@@ -56,6 +56,10 @@ FIELD_NAMES = [
     'GPSHDOP',       # uint8_t  - GPS HDOP
     'GPSLat',        # int32_t  - GPS latitude (scaled by 1000000)
     'GPSLng',        # int32_t  - GPS longitude (scaled by 1000000)
+    'GPSHour',       # uint8_t  - GPS hour
+    'GPSMinute',     # uint8_t  - GPS minute
+    'GPSSecond',     # uint8_t  - GPS second
+    'GPSMillisecond',# uint16_t - GPS millisecond
     'LoRaRssi',      # int8_t   - LoRa RSSI
     'LoRaSnr',       # int8_t   - LoRa SNR
     'LoRaPktRate'    # uint8_t  - LoRa packet rate
@@ -65,6 +69,15 @@ ser = None
 connected_clients = 0
 last_packet_time = None
 connection_status = False
+
+# Debug counters
+debug_stats = {
+    'sync_found': 0,
+    'invalid_size': 0,
+    'checksum_fail': 0,
+    'valid_packets': 0,
+    'parse_errors': 0
+}
 
 def calculate_checksum(data):
     """Calculate XOR checksum"""
@@ -112,13 +125,11 @@ def parse_telemetry(raw_data):
         data = dict(zip(FIELD_NAMES, values))
         
         # Get current UTC time
-        from datetime import datetime, timezone, timedelta
-        
-        utc_plus_1 = timezone(timedelta(hours=1))
-        utc_now = datetime.now(utc_plus_1)
+        import datetime
+        utc_now = datetime.datetime.utcnow()
         
         # Format as HH:MM:SS.mmm
-        data['timestamp'] = utc_now.strftime('%H:%M:%S.%f')[:-3]  # Remove last 3 digits of microseconds
+        data['timestamp'] = utc_now.strftime('%H:%M:%S.%f')[:-3]
         data['timestamp_seconds'] = utc_now.hour * 3600 + utc_now.minute * 60 + utc_now.second + utc_now.microsecond / 1000000.0
         
         # Convert GPS coordinates from scaled integers to floats
@@ -153,6 +164,23 @@ def parse_telemetry(raw_data):
     except struct.error as e:
         print(f"✗ Struct unpacking error: {e}")
         return None
+
+def print_debug_stats():
+    """Print debug statistics every 10 seconds"""
+    while True:
+        time.sleep(10)
+        print("\n" + "="*60)
+        print("DEBUG STATISTICS (last 10 seconds):")
+        print(f"  Sync bytes found: {debug_stats['sync_found']}")
+        print(f"  Invalid size: {debug_stats['invalid_size']}")
+        print(f"  Checksum failures: {debug_stats['checksum_fail']}")
+        print(f"  Valid packets: {debug_stats['valid_packets']}")
+        print(f"  Parse errors: {debug_stats['parse_errors']}")
+        print("="*60 + "\n")
+        
+        # Reset counters
+        for key in debug_stats:
+            debug_stats[key] = 0
 
 def uart_reader():
     """Background thread to read UART data with packet framing"""
@@ -189,46 +217,62 @@ def uart_reader():
             
             if sync_attempts > 0:
                 print(f"✓ Packet sync found after {sync_attempts} attempts!")
+                debug_stats['sync_found'] += 1
                 sync_attempts = 0
             
             # Read size byte
             size_byte = ser.read(1)
             if len(size_byte) == 0:
+                print("  ⚠ Timeout reading size byte")
                 continue
             
             packet_size = size_byte[0]
             
+            # DEBUG: Print what we got
+            print(f"  → Size byte: {packet_size} (0x{packet_size:02X}) | Expected: {TELEM_STRUCT_SIZE} (0x{TELEM_STRUCT_SIZE:02X})")
+            
             # Validate packet size
             if packet_size != TELEM_STRUCT_SIZE:
-                print(f"⚠ Invalid packet size: {packet_size}, expected {TELEM_STRUCT_SIZE}")
+                print(f"  ✗ Invalid packet size: {packet_size}, expected {TELEM_STRUCT_SIZE}")
+                debug_stats['invalid_size'] += 1
                 continue
             
             # Read data
             raw_data = ser.read(packet_size)
             if len(raw_data) != packet_size:
-                print(f"⚠ Incomplete data: got {len(raw_data)}, expected {packet_size}")
+                print(f"  ⚠ Incomplete data: got {len(raw_data)}, expected {packet_size}")
                 continue
+            
+            # DEBUG: Print first few bytes of data
+            data_preview = ' '.join([f'{b:02X}' for b in raw_data[:8]])
+            print(f"  → Data preview: {data_preview}...")
             
             # Read checksum
             checksum_byte = ser.read(1)
             if len(checksum_byte) == 0:
+                print("  ⚠ Timeout reading checksum")
                 continue
             
             received_checksum = checksum_byte[0]
             calculated_checksum = calculate_checksum(raw_data)
             
+            print(f"  → Checksum: received=0x{received_checksum:02X}, calculated=0x{calculated_checksum:02X}")
+            
             # Verify checksum
             if received_checksum != calculated_checksum:
                 checksum_errors += 1
-                if checksum_errors % 10 == 0:
-                    print(f"✗ Checksum errors: {checksum_errors} (got 0x{received_checksum:02X}, expected 0x{calculated_checksum:02X})")
+                debug_stats['checksum_fail'] += 1
+                print(f"  ✗ Checksum MISMATCH! (total errors: {checksum_errors})")
                 continue
+            
+            print(f"  ✓ Checksum OK - parsing packet...")
             
             # Parse the packet
             telemetry = parse_telemetry(raw_data)
             
             if telemetry:
                 packet_count += 1
+                debug_stats['valid_packets'] += 1
                 last_packet_time = time.time()  # Update last packet time
                 
                 # Update connection status if needed
@@ -236,24 +280,19 @@ def uart_reader():
                     connection_status = True
                     with app.app_context():
                         socketio.emit('connection_status', {'connected': True}, namespace='/')
+                    print("  🟢 Connection status: CONNECTED")
                 
                 # Emit to all connected clients
                 with app.app_context():
                     socketio.emit('telemetry', telemetry, namespace='/')
                 
-                # Print status every 25 packets (1 second at 25Hz)
-                if packet_count % 25 == 0:
-                    print(f"📡 Pkts: {packet_count} | "
-                          f"Speed: {telemetry['sebesseg']} km/h | "
-                          f"Gear: {telemetry['fokozat']} | "
-                          f"RSSI: {telemetry['rssi']} dBm | "
-                          f"GPS: {telemetry['GPSSats']} sats | "
-                          f"Pos: {telemetry['latitude']:.6f}, {telemetry['longitude']:.6f} | "
-                          f"CRC errs: {checksum_errors}")
+                # Print brief status
+                print(f"  📡 Packet #{packet_count} | Speed: {telemetry['GPSSpeed']} km/h | "
+                      f"Gear: {telemetry['fokozat']} | RSSI: {telemetry['rssi']} dBm\n")
             else:
                 error_count += 1
-                if error_count % 10 == 0:
-                    print(f"✗ Parse errors: {error_count}")
+                debug_stats['parse_errors'] += 1
+                print(f"  ✗ Parse error (total: {error_count})\n")
                 
         except Exception as e:
             print(f"✗ Serial error: {e}")
@@ -313,13 +352,14 @@ def handle_disconnect():
 
 if __name__ == '__main__':
     print('=' * 70)
-    print('🏎️  RaceLink UART Telemetry Server (Framed Protocol)')
+    print('🎯 RaceLink DEBUG TELEMETRY SERVER')
     print('=' * 70)
     print(f'📡 Serial Port: {SERIAL_PORT} @ {BAUD_RATE} baud')
     print(f'📦 Data Size: {TELEM_STRUCT_SIZE} bytes')
     print(f'🔒 Frame Format: [0xAA][0x55][SIZE][DATA][CHECKSUM]')
     print(f'🌐 Dashboard URL: http://localhost:5000/')
     print('=' * 70)
+    print('\n🔍 DEBUG MODE ENABLED - Verbose output active\n')
     
     # Start UART reader in background thread
     uart_thread = threading.Thread(target=uart_reader, daemon=True)
@@ -328,6 +368,10 @@ if __name__ == '__main__':
     # Start connection monitor thread
     monitor_thread = threading.Thread(target=connection_monitor, daemon=True)
     monitor_thread.start()
+    
+    # Start debug statistics thread
+    stats_thread = threading.Thread(target=print_debug_stats, daemon=True)
+    stats_thread.start()
     
     # Start Flask-SocketIO server
     try:

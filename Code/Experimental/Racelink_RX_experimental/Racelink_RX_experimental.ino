@@ -76,8 +76,8 @@ telemetryPkt telem;
 uint8_t RXBuf[sizeof(telemetryPkt)];  // Receive buffer
 
 // UART Framing constants
-const uint8_t SYNC_BYTE_1 = 0xAA;
-const uint8_t SYNC_BYTE_2 = 0x55;
+const uint8_t SYNC_BYTE_1 = 0xFF;
+const uint8_t SYNC_BYTE_2 = 0xAA;
 
 /*
      ___ _____ ___  ___    ___ ___  ___ _____ ___  ___ 
@@ -253,8 +253,6 @@ void calcPktRateTask(void *pvParameters)
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
     countSnapshot = pktCount;
     pktCount = 0;
-    Serial.print("packets per second:\t");
-    Serial.println(countSnapshot);
   }
 }
 
@@ -269,7 +267,6 @@ void SendTelemUartTask(void *pvParameters)
         memcpy(&telem, RXBuf, sizeof(telemetryPkt));
         telem.LoRaRssi = latestRSSI;
         telem.LoRaSnr = latestSNR;
-        
         // Calculate checksum
         uint8_t checksum = calculateChecksum((uint8_t*)&telem, sizeof(telemetryPkt));
         
@@ -384,18 +381,14 @@ void lr1121_get_setup(void)
 
 //============================SEND SETUP TO TX=================================
 void lr1121_send_setup(void) {
-    // Pack struct into binary buffer and send 5 times
+    // Pack struct into binary buffer and send 2 times
     uint8_t buffer[sizeof(RadioConfig)];
     memcpy(buffer, &cfg, sizeof(RadioConfig));
     
-    Serial.printf("[RX] Sending config (size: %d bytes)\n", sizeof(RadioConfig));
-    
-    for(int i = 0; i < 3; i++) {
+    for(int i = 0; i < 2; i++) {
         radio.transmit(buffer, sizeof(RadioConfig));
-        delay(50);
+        delay(10);
     }
-    
-    Serial.println("[RX] Config transmitted");
 }
 
 //===================SET RECEIVE FLAG=======================
