@@ -477,7 +477,7 @@
             pink: 'rgb(255, 159, 192)'
         };
         
-        // Widget definitions - each data point gets its own widget
+        // Widget definitions
         const widgets = [
             // Speed & Performance
             { id: 'speed', title: '<i class="fa-solid fa-gauge-high"></i> Speed', x: 4, y: 0, w: 5, h: 3, category: 'performance' },
@@ -514,7 +514,7 @@
         ];
         
     function createWidget(widget) {
-        // Check if this is the map widget - it needs different HTML
+        // Check if this is the map widget
         if (widget.id === 'map') {
             return `
                 <div class="grid-stack-item" gs-id="${widget.id}" gs-x="${widget.x}" gs-y="${widget.y}" gs-w="${widget.w}" gs-h="${widget.h}">
@@ -571,7 +571,6 @@
                 disableOneColumnMode: true,
                 animate: true,
                 handle: '.widget-header'
-                // Grid is enabled by default - drag and resize work immediately
             });
             
             // Load saved layout or use default
@@ -681,7 +680,7 @@
             // Add widget to grid
             grid.addWidget(createWidget(widget));
             
-            // Initialize ONLY this specific chart after a short delay
+            
             setTimeout(() => {
                 initSingleChart(id);
                 updateWidgetMenu();  // Refresh menu to show updated state
@@ -976,11 +975,11 @@
                 maxZoom: 21
             }).addTo(map);
             
-            // Create marker with your pixel car
+            // Create map marker
             carMarker = L.marker([46.425685, 25.390393], {
                 icon: L.icon({
                     iconUrl: '/static/car.png',
-                    iconSize: [30, 20],      // Size of your pixel car
+                    iconSize: [30, 20],      // Size of car
                     iconAnchor: [15, 10]     // Center point
                 })
             }).addTo(map);
@@ -1017,17 +1016,14 @@
 
         // Socket.io handlers
         socket.on('connect', () => {
-            // Don't change connection status here - wait for actual telemetry data
             console.log('WebSocket connected to server');
         });
 
         socket.on('disconnect', () => {
-            // WebSocket disconnected - mark as disconnected
             document.getElementById('connectionStatus').textContent = '⊘ Disconnected';
             document.getElementById('connectionStatus').className = 'connection-status disconnected';
         });
 
-        // Listen for connection status based on actual telemetry reception
         socket.on('connection_status', (status) => {
             if (status.connected) {
                 document.getElementById('connectionStatus').textContent = '● Connected';
@@ -1042,9 +1038,8 @@
 
 
         socket.on('telemetry', (data) => {
-            const ts = data.timestamp;  // Use the formatted string timestamp directly
+            const ts = data.timestamp;
             
-            // Update status display (use GPSSpeed for display)
            // document.getElementById('speed').textContent = Math.round(data.GPSSpeed);
            // document.getElementById('throttle').textContent = Math.round(data.aps) + '%';
            // document.getElementById('gear').textContent = data.fokozat === 0 ? 'N' : data.fokozat;
@@ -1053,7 +1048,7 @@
             document.getElementById('sats').textContent = Math.round(data.GPSSats);
             document.getElementById('pktrate').textContent = Math.round(data.LoRaPktRate);
             
-            // Update individual charts (use GPSSpeed instead of sebesseg)
+            // Update individual charts
             if (charts.speed) addDataToChart(charts.speed, ts, data.GPSSpeed);
             if (charts.throttle) addDataToChart(charts.throttle, ts, data.aps);
             if (charts.gear) addDataToChart(charts.gear, ts, data.fokozat);
@@ -1083,7 +1078,7 @@
                     map.setView(newPos, map.getZoom());
                 }
                 
-                // Rotate car based on heading
+                // Rotate car based on heading (!not working)
                 if (data.heading !== undefined) {
                     const markerElement = carMarker.getElement();
                     if (markerElement) {
@@ -1093,7 +1088,7 @@
                 
                 console.log('Car updated:', newPos, 'heading:', data.heading);
             }
-            // Update raw data boxes if they exist
+            // Update raw data boxes
             const rawDataElements = {
                 'raw-speed': data.GPSSpeed,
                 'raw-throttle': data.aps,
@@ -1120,7 +1115,7 @@
                 }
             });
             
-            // Debug: log once per second (at 25Hz packet rate)
+            // Debug
             if (Math.random() < 0.04) {
                 console.log(`Raw data: ${foundCount}/14 elements updated`);
                 if (foundCount === 0) {

@@ -1,5 +1,4 @@
 // Racelink RX
-
 #include <RadioLib.h>
 #include <FastLED.h>
 #include <freertos/FreeRTOS.h>
@@ -25,26 +24,26 @@ static Module mod(LR_NSS, LR_IRQ, LR_NRST, LR_BUSY, SPI, SLOW);
 static LR1121 radio(&mod);
 static const uint8_t XR1_RFSW[8] = { 15, 0, 12, 8, 8, 6, 0, 5 };
 
-volatile bool receivedFlag = false;
-bool telemAvailable = false;
-bool newDataAvailable = false;
-SemaphoreHandle_t radioMutex = NULL;
-volatile uint32_t pktCount = 0;
+volatile bool receivedFlag = false;                                           // received flag for radiolib interrupt
+bool telemAvailable = false;                                                  // flag for sending only properly received telemetry over uart
+bool newDataAvailable = false;                                                // flag for sending only new telemetry packets over uart
+SemaphoreHandle_t radioMutex = NULL;                                          // radio semaphore to avoid race conditions (send config & receive telemetry tasks)
+volatile uint32_t pktCount = 0;                                               // packet count for packet rate calculation
 
 float latestRSSI = 0;
-float latestSNR = 0;
+float latestSNR = 0;                                                          //serial print signal strenght and signal noise ratio for debug
 
 
-#pragma pack(1)                 // Pack struct
+#pragma pack(1)                                                                // Pack struct, no padding
 
-struct RadioConfig {            // RADIO CONFIG STRUCT
+struct RadioConfig {                                                           // RADIO CONFIG STRUCT
     float frequency;
     float bandwidth;
     uint8_t spreadingFactor;
     int8_t txPower;
 };
 
-struct telemetryPkt{           // TELEMETRY PACKET STRUCT
+struct telemetryPkt{                                                           // TELEMETRY PACKET STRUCT
   uint8_t agt;
   int8_t lambda;
   uint8_t sebesseg;
@@ -73,9 +72,9 @@ struct telemetryPkt{           // TELEMETRY PACKET STRUCT
 RadioConfig cfg;
 telemetryPkt telem;
 
-uint8_t RXBuf[sizeof(telemetryPkt)];  // Receive buffer
+uint8_t RXBuf[sizeof(telemetryPkt)];                                          // Receive buffer
 
-// UART Framing constants
+// UART Framing for data integrity
 const uint8_t SYNC_BYTE_1 = 0xFF;
 const uint8_t SYNC_BYTE_2 = 0xAA;
 
@@ -115,11 +114,11 @@ uint8_t calculateChecksum(uint8_t* data, size_t len);
 void setup() {
   Serial.begin(115200);
   delay(100);
-  FastLED.addLeds<WS2812, DATA_PIN, RGB>(leds, NUM_LEDS);
-  SPI.begin(LR_SCK, LR_MISO, LR_MOSI, LR_NSS);
+  FastLED.addLeds<WS2812, DATA_PIN, RGB>(leds, NUM_LEDS);                           //ARGB led init
+  SPI.begin(LR_SCK, LR_MISO, LR_MOSI, LR_NSS);                                      //SPI init
   delay(300);
-  radio.XTAL = true;
-  int st = radio.begin();
+  radio.XTAL = true;                                                                //set oscillator type as XTAL not TCXO
+  int st = radio.begin();                                                           //radiolib init
   
   if (st == RADIOLIB_ERR_NONE) {
     Serial.println("[SUCCESS] Radio initialized\n");
@@ -128,21 +127,21 @@ void setup() {
     Serial.println(st);
     while (true) { delay(10); }
   }
-  radio.setPacketReceivedAction(setFlag);
-  radio.setRegulatorDCDC();
-  st = radio.setModem(RADIOLIB_MODEM_LORA);
+  radio.setPacketReceivedAction(setFlag);                                         //radiolib interrupt object
+  radio.setRegulatorDCDC();                                                       //DCDC mode for higher TX power
+  st = radio.setModem(RADIOLIB_MODEM_LORA);                                       //set LoRa modulation
   if (st != RADIOLIB_ERR_NONE) {
     Serial.print("  Error setting modem: ");
     Serial.println(st);
   }
-  xr1_apply_rfsw();
-  lr1121_default_setup(st);
-  lr1121_get_setup();
-  lr1121_send_setup();
-  lr1121_setup(st); 
+  xr1_apply_rfsw();                                                               //set external RF switch (This configures the path to the antenna, very important!)
+  lr1121_default_setup(st);                                                       //set default setup on which setup config will be sent over
+  lr1121_get_setup();                                                             //get setup config over uart or macros
+  lr1121_send_setup();                                                            //send setup config to TX
+  lr1121_setup(st);                                                               //applying setup on RX
   
-  radioMutex = xSemaphoreCreateMutex();
-  xTaskCreate(configBroadcastTask, "ConfigBroadcast", 2048, NULL, 2, NULL);
+  radioMutex = xSemaphoreCreateMutex();                                           //create semaphore
+  xTaskCreate(configBroadcastTask, "ConfigBroadcast", 2048, NULL, 2, NULL);       //RTOS TASKS
   xTaskCreate(telemetryReceiveTask, "TelemetryRx", 3072, NULL, 1, NULL);
   xTaskCreate(calcPktRateTask, "PacketRateCnt", 2048, NULL, 2, NULL);
   xTaskCreate(LEDTask, "LEDTask", 2048, NULL, 2, NULL);
@@ -168,7 +167,7 @@ void setup() {
     |____\___/ \___/|_|  
 */
 void loop() {
-  delay(1000);
+  delay(1000);                                                                    //code executes in RTOS tasks
 }
 
 /*
@@ -178,7 +177,7 @@ void loop() {
     |_|_\ |_| \___/|___/    |_/_/ \_\___/_|\_\___/                                       
 */
 //=============Send config over LoRa===================
-void configBroadcastTask(void *pvParameters) {
+void configBroadcastTask(void *pvParameters) {                                   //send config to TX every 10 seconds(so on a TX brownout event it reconfigures)
   while(1) {
       xSemaphoreTake(radioMutex, portMAX_DELAY);
       lr1121_default_setup(0);
@@ -233,7 +232,7 @@ void telemetryReceiveTask(void *pvParameters) {
 }
 
 //=============Set LED Task================
-void LEDTask(void *pvParameters)
+void LEDTask(void *pvParameters)                                    //Set color in function of signal strenght
 {
   while(1) {
     if(latestRSSI != 0) {
@@ -420,3 +419,9 @@ uint8_t calculateChecksum(uint8_t* data, size_t len) {
   }
   return checksum;
 }
+
+
+
+Serial.println(SystemCoreClock)
+
+

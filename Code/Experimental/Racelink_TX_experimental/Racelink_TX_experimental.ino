@@ -38,8 +38,6 @@ int transmissionState = RADIOLIB_ERR_NONE;
 volatile bool transmittedFlag = false;        //TX interrupt flag
 volatile bool telemReady = false;
 uint32_t txCount = 0;
-static int lastSec = -1;
-static uint32_t secStart = 0;
 
 #pragma pack(1)                               //packed struct, no padding
 struct RadioConfig {
@@ -81,7 +79,7 @@ RadioConfig cfg;
 telemetryPkt telem;
 volatile bool configReceived = false;
 
-uint8_t telemBuf[sizeof(telemetryPkt)];
+uint8_t telemBuf[sizeof(telemetryPkt)];                //telemetry buffer
 
 /*
      ___ _____ ___  ___   ___ ___  ___ _____ ___  ___ 
@@ -119,17 +117,17 @@ void setTxFlag(void);
 void setup() {
   Serial.begin(115200);
   delay(100);
-  SPI.begin(LR_SCK, LR_MISO, LR_MOSI, LR_NSS);
+  SPI.begin(LR_SCK, LR_MISO, LR_MOSI, LR_NSS);                  //spi init
   delay(100);
-  GPSSerial.begin(115200, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-  radio.XTAL = true;
-  int st = radio.begin();
+  GPSSerial.begin(115200, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);    //gpsserial init
+  radio.XTAL = true;                                //XTAL instead of TCXO
+  int st = radio.begin();                           //radiolib init
   if (st != RADIOLIB_ERR_NONE) {
     Serial.print("[ERROR] Init failed: ");
     Serial.println(st);
     while (1);
   }
-  FastLED.addLeds<WS2812, DATA_PIN, RGB>(leds, NUM_LEDS);
+  FastLED.addLeds<WS2812, DATA_PIN, RGB>(leds, NUM_LEDS);           //ARGB led init
   radio.setRegulatorDCDC();                   //DC reg mode for higher tx power
   st = radio.setModem(RADIOLIB_MODEM_LORA);   //LoRa modulation
   xr1_apply_rfsw();                           //rfswitch config  
@@ -167,13 +165,12 @@ void loop()
 void configReceiveTask(void *pvParameters)
 {
   lr1121_default_setup(0);
-    int st = radio.startReceive();  // ADD THIS - put radio into RX mode!
+    int st = radio.startReceive();  //put radio into RX mode
   Serial.println("[TX] RX mode started\n");
   while(1) {
     uint8_t buffer[sizeof(RadioConfig)];
     int state = radio.receive(buffer, sizeof(RadioConfig), 1000);
-    if(state == RADIOLIB_ERR_NONE) {
-      // Reconstruct struct from buffer using memcpy
+    if(state == RADIOLIB_ERR_NONE) {                    // Reconstruct struct from buffer using memcpy
       memcpy(&cfg, buffer, sizeof(RadioConfig));
       configReceived = true;
       

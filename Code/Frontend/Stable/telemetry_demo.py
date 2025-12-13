@@ -11,7 +11,6 @@ import os
 with open('config.json', 'r') as f:
     config = json.load(f)
 
-# Create templates folder if it doesn't exist
 os.makedirs('templates', exist_ok=True)
 
 app = Flask(__name__, template_folder='templates')
@@ -19,22 +18,21 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Serial port configuration
-SERIAL_PORT = 'COM9'  # Change this to your RX's serial port
+SERIAL_PORT = 'COM9'
 BAUD_RATE = 115200
 
 # Packet framing
 SYNC_BYTE_1 = 0xFF
 SYNC_BYTE_2 = 0xAA
 
-# Telemetry packet structure - must match Arduino struct exactly
-# Total size: 41 bytes
+# telemetry format + size
 TELEM_STRUCT_FORMAT = '<BbBHHBBBBbBBBBBBBBiibBB'
 TELEM_STRUCT_SIZE = struct.calcsize(TELEM_STRUCT_FORMAT)
 
 print(f"Expected packet size: {TELEM_STRUCT_SIZE} bytes")
 print(f"Framed packet size: {TELEM_STRUCT_SIZE + 4} bytes (sync + size + data + checksum)")
 
-# Field names matching the struct order
+# telemetry packet
 FIELD_NAMES = [
     'agt',           # uint8_t  - Air intake temp
     'lambda',        # i`nt8_t   - Lambda
@@ -54,8 +52,8 @@ FIELD_NAMES = [
     'GPSSpeed',      # uint8_t  - GPS speed
     'GPSSats',       # uint8_t  - GPS satellites
     'GPSHDOP',       # uint8_t  - GPS HDOP
-    'GPSLat',        # int32_t  - GPS latitude (scaled by 1000000)
-    'GPSLng',        # int32_t  - GPS longitude (scaled by 1000000)
+    'GPSLat',        # int32_t  - GPS latitude *1000000
+    'GPSLng',        # int32_t  - GPS longitude *1000000
     'LoRaRssi',      # int8_t   - LoRa RSSI
     'LoRaSnr',       # int8_t   - LoRa SNR
     'LoRaPktRate'    # uint8_t  - LoRa packet rate
@@ -83,7 +81,7 @@ def open_serial():
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE,
-            timeout=0.1  # Short timeout for responsive sync
+            timeout=0.1
         )
         print(f"✓ Serial port {SERIAL_PORT} opened at {BAUD_RATE} baud")
         return True
@@ -105,7 +103,7 @@ def sync_to_packet(ser):
 def parse_telemetry(raw_data):
     """Parse binary telemetry packet into dictionary"""
     try:
-        # Unpack binary data according to struct format
+        # Unpack binary data
         values = struct.unpack(TELEM_STRUCT_FORMAT, raw_data)
         
         # Create dictionary with field names
@@ -117,11 +115,10 @@ def parse_telemetry(raw_data):
         utc_plus_1 = timezone(timedelta(hours=1))
         utc_now = datetime.now(utc_plus_1)
         
-        # Format as HH:MM:SS.mmm
-        data['timestamp'] = utc_now.strftime('%H:%M:%S.%f')[:-3]  # Remove last 3 digits of microseconds
+        data['timestamp'] = utc_now.strftime('%H:%M:%S.%f')[:-3]
         data['timestamp_seconds'] = utc_now.hour * 3600 + utc_now.minute * 60 + utc_now.second + utc_now.microsecond / 1000000.0
         
-        # Convert GPS coordinates from scaled integers to floats
+        # Convert GPS coordinates back to floats
         if data['GPSLat'] != 0 and data['GPSLng'] != 0:
             lat = data['GPSLat'] / 1000000.0
             lon = data['GPSLng'] / 1000000.0
@@ -134,16 +131,15 @@ def parse_telemetry(raw_data):
         # Convert voltage from millivolts to volts
         data['feszultseg'] = data['feszultseg'] / 1000.0
         
-        # Convert lambda from int to float (assumed scaled by 10)
+        # Convert lambda from int to float
         data['lambda'] = data['lambda'] / 10.0
         
-        # Convert HDOP from scaled integer to float
+        # Convert HDOP from integer to float
         data['GPSHDOP'] = data['GPSHDOP'] / 10.0
         
-        # Convert acceleration from int to float (assumed scaled by 10)
+        # Convert acceleration from int to float
         data['gyorsulas'] = data['gyorsulas'] / 10.0
         
-        # Rename fields for dashboard compatibility
         data['rssi'] = data['LoRaRssi']
         data['snr'] = data['LoRaSnr']
         data['olajnyomas'] = data['olajny']  # Oil pressure

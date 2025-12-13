@@ -10,18 +10,16 @@ import json
 with open('config.json', 'r') as f:
     config = json.load(f)
 
-# Create templates folder if it doesn't exist
 os.makedirs('templates', exist_ok=True)
 
 app = Flask(__name__, template_folder='templates')
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # Disable caching for development
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Track center coordinates
-# Track center coordinates - CHANGE THESE LINES
 TRACK_CENTER_LAT = 46.425685
 TRACK_CENTER_LON = 25.390393
-TRACK_RADIUS = 0.0003  # Approximate radius in degrees (about 50 meters)
+TRACK_RADIUS = 0.0003
 
 # Generate circular test path
 def generate_track_path():
